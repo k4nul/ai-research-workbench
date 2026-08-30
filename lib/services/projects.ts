@@ -384,7 +384,7 @@ export async function getDashboard(): Promise<Record<string, unknown>> {
       open_gaps: string;
       unsupported_claims: string;
     }>(
-      "SELECT COUNT(*) FILTER (WHERE p.status NOT IN ('DELIVERED', 'ARCHIVED'))::text AS active_projects, COUNT(*) FILTER (WHERE p.deadline BETWEEN CURRENT_DATE AND CURRENT_DATE + 7 AND p.status NOT IN ('DELIVERED', 'ARCHIVED'))::text AS due_soon, COUNT(DISTINCT p.id) FILTER (WHERE qf.severity = 'BLOCKER' AND qf.resolution_status = 'OPEN')::text AS qa_blocked, COUNT(*) FILTER (WHERE p.approval_status = 'PENDING')::text AS awaiting_approval, (SELECT COUNT(*) FROM research_questions rq WHERE rq.gap_status = 'OPEN')::text AS open_gaps, (SELECT COUNT(*) FROM claims c WHERE c.support_status = 'UNSUPPORTED' AND c.include_in_report = TRUE)::text AS unsupported_claims FROM research_projects p LEFT JOIN qa_findings qf ON qf.project_id = p.id"
+      "SELECT COUNT(DISTINCT p.id) FILTER (WHERE p.status NOT IN ('DELIVERED', 'ARCHIVED'))::text AS active_projects, COUNT(DISTINCT p.id) FILTER (WHERE p.deadline BETWEEN CURRENT_DATE AND CURRENT_DATE + 7 AND p.status NOT IN ('DELIVERED', 'ARCHIVED'))::text AS due_soon, COUNT(DISTINCT p.id) FILTER (WHERE qf.severity = 'BLOCKER' AND qf.resolution_status <> 'RESOLVED')::text AS qa_blocked, COUNT(DISTINCT p.id) FILTER (WHERE p.approval_status = 'PENDING')::text AS awaiting_approval, (SELECT COUNT(*) FROM research_questions rq WHERE rq.gap_status = 'OPEN')::text AS open_gaps, (SELECT COUNT(*) FROM claims c WHERE c.support_status = 'UNSUPPORTED' AND c.include_in_report = TRUE)::text AS unsupported_claims FROM research_projects p LEFT JOIN qa_findings qf ON qf.project_id = p.id"
     ),
     listProjects(),
     query(

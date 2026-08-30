@@ -7,6 +7,7 @@ import {
 import { writeAuditEvent } from "@/lib/services/audit";
 import { notFound } from "@/lib/services/errors";
 import { refreshProjectProgress } from "@/lib/services/progress";
+import { invalidateDownstreamReview } from "@/lib/services/review-state";
 
 export async function addResearchQuestion(
   projectId: string,
@@ -32,6 +33,7 @@ export async function addResearchQuestion(
         input.researchGap ? "OPEN" : "NONE"
       ]
     );
+    await invalidateDownstreamReview(client, projectId, "RESEARCHING");
     await writeAuditEvent(client, {
       projectId,
       actorType: "USER",
@@ -67,6 +69,7 @@ export async function updateResearchQuestion(
       "UPDATE research_questions SET status = COALESCE($3, status), gap_status = COALESCE($4, gap_status), research_gap = COALESCE($5, research_gap), updated_at = NOW() WHERE id = $1 AND project_id = $2 RETURNING *",
       [questionId, projectId, input.status ?? null, input.gapStatus ?? null, input.researchGap ?? null]
     );
+    await invalidateDownstreamReview(client, projectId, "RESEARCHING");
     await writeAuditEvent(client, {
       projectId,
       actorType: "USER",
@@ -114,6 +117,7 @@ export async function addResearchPlan(
         input.aiSuggested
       ]
     );
+    await invalidateDownstreamReview(client, projectId, "RESEARCHING");
     await client.query(
       "UPDATE research_questions SET status = 'PLANNED', updated_at = NOW() WHERE id = $1 AND status = 'OPEN'",
       [input.questionId]

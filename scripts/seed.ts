@@ -468,7 +468,7 @@ async function seed(): Promise<void> {
     const resolvedQa = [
       ["qa-demo-1", "UNSOURCED_KEY_CLAIM", "BLOCKER", "Detailed analysis", "A key percentage had no source ID.", "Added [source-demo-2] and verified its evidence."],
       ["qa-demo-2", "OUTDATED_SOURCE", "HIGH", "Recommendations", "The 2021 market note was used as current evidence.", "Removed it from current recommendations and retained it only in limitations."],
-      ["qa-demo-3", "UNRESOLVED_CONFLICT", "BLOCKER", "Executive summary", "Conflicting adoption results were not reconciled.", "Separated first-month and post-onboarding time horizons."],
+      ["qa-demo-3", "UNRESOLVED_SOURCE_CONFLICT", "BLOCKER", "Executive summary", "Conflicting adoption results were not reconciled.", "Separated first-month and post-onboarding time horizons."],
       ["qa-demo-4", "DUPLICATE_SOURCE", "MEDIUM", "Source library", "Source 9 duplicates source 1.", "Marked the duplicate and excluded it from the report."],
       ["qa-demo-5", "EMPTY_REQUIRED_SECTION", "BLOCKER", "Risks and limitations", "The required limitations section was empty.", "Added the fixture and small-team evidence limitations."]
     ] as const;
