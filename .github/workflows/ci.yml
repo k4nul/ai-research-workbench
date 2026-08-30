@@ -28,6 +28,7 @@ jobs:
           --health-retries 20
     env:
       DATABASE_URL: postgresql://research:research@localhost:5432/research_workbench
+      TEST_DATABASE_URL: postgresql://research:research@localhost:5432/research_workbench_test
       DEMO_MODE: "true"
       APP_URL: http://127.0.0.1:3100
       STORAGE_DIR: ./.data
