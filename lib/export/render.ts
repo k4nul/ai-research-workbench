@@ -134,12 +134,15 @@ export function renderReportHtml(
 }
 
 function csvCell(value: unknown): string {
-  const normalized =
+  let normalized =
     value === null || value === undefined
       ? ""
       : typeof value === "string"
         ? value
         : JSON.stringify(value);
+  if (/^[\t\r ]*[=+\-@]/.test(normalized)) {
+    normalized = "'" + normalized;
+  }
   return '"' + normalized.replaceAll('"', '""') + '"';
 }
 
