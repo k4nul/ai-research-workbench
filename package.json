@@ -2,6 +2,7 @@
   "name": "ai-research-workbench",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "Evidence-first research operations workbench for small research teams.",
   "license": "MIT",
   "engines": {
