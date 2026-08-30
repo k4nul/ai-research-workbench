@@ -383,7 +383,7 @@ async function seed(): Promise<void> {
         importance: claim[4],
         support_status: claim[5],
         fact_or_inference: claim[6],
-        include_in_report: claim[0] !== "claim-demo-12",
+        include_in_report: !["claim-demo-11", "claim-demo-12"].includes(claim[0]),
         resolution_notes:
           claim[0] === "claim-demo-2"
             ? "The report separates post-onboarding gains from first-month learning costs."
