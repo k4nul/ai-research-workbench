@@ -118,7 +118,6 @@ async function buildQaContext(projectId: string): Promise<{
     throw conflict("NO_DELIVERABLE", "Create a report before running QA.");
   }
 
-  const sourceById = new Map(sourcesResult.rows.map((source) => [source.id, source]));
   const evidenceById = new Map(evidenceResult.rows.map((evidence) => [evidence.id, evidence]));
   const questionIds = new Set(questionsResult.rows.map((question) => question.id));
   const supportLinks = new Map<string, typeof linksResult.rows>();

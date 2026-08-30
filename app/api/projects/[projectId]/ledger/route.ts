@@ -9,6 +9,6 @@ export async function GET(request: Request, context: Context) {
   return handleRoute(() => listLedger(projectId, unsupportedOnly));
 }
 
-export async function POST(request: Request, _context: Context) {
+export async function POST(request: Request) {
   return handleRoute(async () => linkClaimEvidence(await request.json()));
 }
