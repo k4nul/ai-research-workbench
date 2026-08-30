@@ -1,0 +1,6 @@
+ALTER TABLE evidence
+  ADD COLUMN IF NOT EXISTS support_extent TEXT NOT NULL DEFAULT 'FULL'
+  CHECK (support_extent IN ('FULL', 'PARTIAL'));
+
+ALTER TABLE claims
+  ADD COLUMN IF NOT EXISTS verification_possible BOOLEAN NOT NULL DEFAULT TRUE;

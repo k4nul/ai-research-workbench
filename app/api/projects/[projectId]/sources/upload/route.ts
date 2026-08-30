@@ -10,9 +10,9 @@ function text(form: FormData, name: string): string | undefined {
 }
 
 export async function POST(request: Request, context: Context) {
-  enforceRateLimit(request, "source-upload", 10);
   const { projectId } = await context.params;
   return handleRoute(async () => {
+    enforceRateLimit(request, "source-upload", 10);
     const form = await request.formData();
     const file = form.get("file");
     if (!(file instanceof File)) {

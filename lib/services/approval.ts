@@ -5,6 +5,15 @@ import { refreshProjectProgress } from "@/lib/services/progress";
 
 type ApprovalAction = "request" | "approve" | "deliver";
 
+type WorkflowReadiness = {
+  scope_ready: boolean;
+  plan_ready: boolean;
+  questions_ready: boolean;
+  claims_ready: boolean;
+  findings_ready: boolean;
+  report_ready: boolean;
+};
+
 export async function runApprovalAction(
   projectId: string,
   action: ApprovalAction,
@@ -29,12 +38,43 @@ export async function runApprovalAction(
     if (Number(blockers.rows[0].count) > 0 || !project.rows[0].qa_passed_at) {
       throw conflict("QA_BLOCKED", "The project must pass QA with no open blockers.");
     }
+    const readiness = await client.query<WorkflowReadiness>(
+      "SELECT " +
+        "(p.scope_approved_at IS NOT NULL) AS scope_ready, " +
+        "(p.plan_approved_at IS NOT NULL AND EXISTS (SELECT 1 FROM research_questions rq WHERE rq.project_id = p.id) AND NOT EXISTS (SELECT 1 FROM research_questions rq WHERE rq.project_id = p.id AND NOT EXISTS (SELECT 1 FROM research_plans rp WHERE rp.question_id = rq.id AND rp.project_id = p.id AND rp.human_approved = TRUE))) AS plan_ready, " +
+        "(EXISTS (SELECT 1 FROM research_questions rq WHERE rq.project_id = p.id) AND NOT EXISTS (SELECT 1 FROM research_questions rq WHERE rq.project_id = p.id AND rq.status <> 'COMPLETE' AND rq.gap_status NOT IN ('ACCEPTED', 'RESOLVED'))) AS questions_ready, " +
+        "(EXISTS (SELECT 1 FROM claims c WHERE c.project_id = p.id AND c.include_in_report = TRUE) AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.project_id = p.id AND c.include_in_report = TRUE AND (c.verification_possible = FALSE OR NOT EXISTS (SELECT 1 FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id WHERE ce.claim_id = c.id AND ce.relationship = 'SUPPORTS' AND e.verification_status = 'VERIFIED')))) AS claims_ready, " +
+        "(EXISTS (SELECT 1 FROM findings f WHERE f.project_id = p.id) AND NOT EXISTS (SELECT 1 FROM findings f WHERE f.project_id = p.id AND NOT EXISTS (SELECT 1 FROM finding_claims fc JOIN claims c ON c.id = fc.claim_id WHERE fc.finding_id = f.id AND c.include_in_report = TRUE AND c.verification_possible = TRUE AND EXISTS (SELECT 1 FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id WHERE ce.claim_id = c.id AND ce.relationship = 'SUPPORTS' AND e.verification_status = 'VERIFIED')))) AS findings_ready, " +
+        "COALESCE((SELECT REGEXP_REPLACE(COALESCE(d.sections->>'researchPurpose', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'executiveSummary', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'researchScope', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'methodology', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'keyFindings', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'detailedAnalysis', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'risksAndLimitations', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'recommendations', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'references', ''), '[[:space:]]', '', 'g') <> '' FROM deliverables d WHERE d.project_id = p.id ORDER BY d.version DESC LIMIT 1), FALSE) AS report_ready " +
+        "FROM research_projects p WHERE p.id = $1",
+      [projectId]
+    );
+    const missing = Object.entries(readiness.rows[0] ?? {})
+      .filter(([, ready]) => !ready)
+      .map(([gate]) => gate.replace(/_ready$/, ""));
+    if (missing.length > 0) {
+      throw conflict(
+        "WORKFLOW_INCOMPLETE",
+        "Complete the required workflow before approval: " + missing.join(", ") + "."
+      );
+    }
 
     if (action === "request") {
-      await client.query(
-        "UPDATE research_projects SET approval_status = 'PENDING', status = 'APPROVAL_REQUIRED', updated_at = NOW() WHERE id = $1",
-        [projectId]
-      );
+      if (
+        project.rows[0].approval_status === "APPROVED" ||
+        project.rows[0].status === "DELIVERED"
+      ) {
+        throw conflict(
+          "INVALID_APPROVAL_STATE",
+          "An approved or delivered project cannot return to approval request without a material revision."
+        );
+      }
+      if (project.rows[0].approval_status !== "PENDING") {
+        await client.query(
+          "UPDATE research_projects SET approval_status = 'PENDING', status = 'APPROVAL_REQUIRED', approved_at = NULL, delivered_at = NULL, updated_at = NOW() WHERE id = $1",
+          [projectId]
+        );
+      }
     } else if (action === "approve") {
       if (!confirmation) {
         throw conflict(
@@ -54,11 +94,17 @@ export async function runApprovalAction(
         [projectId]
       );
     } else {
+      if (project.rows[0].status !== "APPROVED") {
+        throw conflict(
+          "INVALID_APPROVAL_STATE",
+          "Only an approved project can be marked delivered."
+        );
+      }
       if (project.rows[0].approval_status !== "APPROVED") {
         throw conflict("APPROVAL_REQUIRED", "Approve the project before marking it delivered.");
       }
       const finalExport = await client.query(
-        "SELECT id FROM project_exports WHERE project_id = $1 AND format = 'ZIP' ORDER BY created_at DESC LIMIT 1",
+        "SELECT id FROM project_exports WHERE project_id = $1 AND format = 'ZIP' AND is_current = TRUE ORDER BY created_at DESC LIMIT 1",
         [projectId]
       );
       if (!finalExport.rowCount) {

@@ -233,7 +233,7 @@ const claims = [
   ["claim-demo-8", "question-demo-4", "The available fixture evidence cannot establish outcomes for teams under five researchers.", "INTERPRETATION", "HIGH", "SUPPORTED", "INFERENCE"],
   ["claim-demo-9", "question-demo-2", "Benefits are more credible after onboarding than during the first month.", "INFERENCE", "MEDIUM", "SUPPORTED", "INFERENCE"],
   ["claim-demo-10", "question-demo-3", "Traceable evidence is a prerequisite for high-impact research outputs.", "FACT", "CRITICAL", "SUPPORTED", "FACT"],
-  ["claim-demo-11", "question-demo-1", "Legacy 2021 market assumptions should not drive the current decision.", "RECOMMENDATION", "MEDIUM", "OUTDATED", "INFERENCE"],
+  ["claim-demo-11", "question-demo-1", "Legacy 2021 market assumptions should not drive the current decision.", "RECOMMENDATION", "MEDIUM", "UNSUPPORTED", "INFERENCE"],
   ["claim-demo-12", "question-demo-2", "Adoption produces immediate productivity gains for every team.", "FACT", "LOW", "UNSUPPORTED", "FACT"]
 ] as const;
 
@@ -491,8 +491,8 @@ async function seed(): Promise<void> {
     await insert(client, "ai_runs", {
       id: "ai-run-demo-1",
       project_id: ids.project,
-      stage: "BRIEF_ANALYSIS",
-      provider: "mock",
+      stage: "intake_analysis",
+      provider: "mock-ai",
       model: "deterministic-fixture-v1",
       prompt_template_version: "brief-analysis.v1",
       duration_ms: 7,

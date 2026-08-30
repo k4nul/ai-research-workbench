@@ -17,7 +17,22 @@ export const AI_STAGES = [
 export type AIStage = (typeof AI_STAGES)[number];
 
 const nonBlank = z.string().trim().min(1);
-const sourceIds = z.array(nonBlank);
+const shortText = nonBlank.max(4_000);
+const longText = z.string().max(200_000);
+const identifier = nonBlank.max(200);
+const sourceIds = z.array(identifier).max(200).superRefine((ids, context) => {
+  const seen = new Set<string>();
+  ids.forEach((id, index) => {
+    if (seen.has(id)) {
+      context.addIssue({
+        code: "custom",
+        message: "Source IDs must be unique.",
+        path: [index]
+      });
+    }
+    seen.add(id);
+  });
+});
 
 export const aiStageOutputSchemas = {
   intake_analysis: z
@@ -26,6 +41,7 @@ export const aiStageOutputSchemas = {
       ambiguousTerms: z.array(nonBlank),
       exclusions: z.array(nonBlank),
       freshnessRequirement: nonBlank,
+      expectedSources: z.array(nonBlank),
       completionCriteria: z.array(nonBlank),
       risks: z.array(nonBlank)
     })
@@ -35,13 +51,19 @@ export const aiStageOutputSchemas = {
       questions: z.array(
         z
           .object({
-            id: nonBlank,
-            question: nonBlank,
+            id: identifier,
+            question: z.string().trim().min(5).max(4_000),
             priority: z.enum(["HIGH", "MEDIUM", "LOW"]),
-            completionCriteria: z.array(nonBlank)
+            completionCriteria: z
+              .array(z.string().trim().min(3).max(4_000))
+              .min(1)
+              .max(100)
+              .refine((criteria) => criteria.join(" ").length <= 4_000, {
+                message: "Combined completion criteria must not exceed 4000 characters."
+              })
           })
           .strict()
-      )
+      ).min(1).max(100)
     })
     .strict(),
   research_plan: z
@@ -49,16 +71,20 @@ export const aiStageOutputSchemas = {
       steps: z.array(
         z
           .object({
-            id: nonBlank,
-            questionId: nonBlank,
-            queries: z.array(nonBlank),
-            primarySourceTypes: z.array(nonBlank),
-            secondarySourceTypes: z.array(nonBlank),
-            completionCondition: nonBlank,
-            risks: z.array(nonBlank)
+            id: identifier,
+            questionId: identifier,
+            searchStrategy: z.string().trim().min(3).max(10_000),
+            queries: z.array(z.string().trim().min(1).max(500)).max(30),
+            primarySourceTypes: z.array(z.string().trim().min(1).max(100)).max(20),
+            secondarySourceTypes: z.array(z.string().trim().min(1).max(100)).max(20),
+            comparisonTargets: z.array(z.string().trim().min(1).max(500)).max(20),
+            expectedOutput: z.string().trim().min(3).max(4_000),
+            completionCondition: z.string().trim().min(3).max(4_000),
+            risks: z.array(z.string().trim().min(1).max(1_000)).max(30),
+            researchGap: z.string().trim().max(4_000).nullable()
           })
           .strict()
-      )
+      ).min(1).max(100)
     })
     .strict(),
   source_summary: z
@@ -165,6 +191,118 @@ export const aiStageOutputSchemas = {
           .strict()
       ),
       revisedText: z.string()
+    })
+    .strict()
+} satisfies Record<AIStage, z.ZodType>;
+
+export const aiStageInputSchemas = {
+  intake_analysis: z
+    .object({
+      brief: longText.pipe(nonBlank),
+      audience: shortText.optional(),
+      jurisdiction: shortText.optional(),
+      asOfDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
+    })
+    .strict(),
+  question_decomposition: z
+    .object({
+      coreQuestion: shortText,
+      scope: longText.pipe(nonBlank),
+      completionCriteria: z.array(shortText).max(100)
+    })
+    .strict(),
+  research_plan: z
+    .object({
+      questions: z
+        .array(z.object({ id: identifier, question: shortText }).strict())
+        .min(1)
+        .max(100),
+      constraints: z.array(shortText).max(100)
+    })
+    .strict(),
+  source_summary: z
+    .object({
+      sourceId: identifier,
+      content: longText,
+      sourceMetadata: z.record(z.string(), z.unknown()).optional()
+    })
+    .strict(),
+  evidence_extraction: z
+    .object({
+      sources: z
+        .array(z.object({ sourceId: identifier, content: longText }).strict())
+        .min(1)
+        .max(100),
+      claimHint: shortText.optional()
+    })
+    .strict(),
+  claim_generation: z
+    .object({
+      evidence: z
+        .array(z.object({ sourceId: identifier, summary: longText }).strict())
+        .max(200),
+      researchQuestion: shortText
+    })
+    .strict(),
+  gap_detection: z
+    .object({
+      questions: z.array(z.object({ id: identifier, question: shortText }).strict()).max(100),
+      claims: z
+        .array(
+          z
+            .object({
+              questionId: identifier.optional(),
+              text: longText,
+              sourceIds
+            })
+            .strict()
+        )
+        .max(500)
+    })
+    .strict(),
+  conflict_detection: z
+    .object({
+      claims: z
+        .array(z.object({ text: longText, sourceIds }).strict())
+        .max(500),
+      evidence: z
+        .array(z.object({ sourceId: identifier, summary: longText }).strict())
+        .max(500)
+    })
+    .strict(),
+  report_outline: z
+    .object({
+      findings: z
+        .array(
+          z.object({ id: identifier, summary: longText, sourceIds }).strict()
+        )
+        .max(500),
+      claimIds: z.array(identifier).max(500)
+    })
+    .strict(),
+  draft_generation: z
+    .object({
+      title: shortText,
+      outline: z
+        .array(z.object({ title: shortText, purpose: shortText }).strict())
+        .max(100),
+      claims: z
+        .array(
+          z.object({ id: identifier, text: longText, sourceIds }).strict()
+        )
+        .max(500)
+    })
+    .strict(),
+  qa_revision: z
+    .object({
+      draft: longText,
+      qaFindings: z
+        .array(
+          z
+            .object({ severity: shortText, location: shortText, problem: longText })
+            .strict()
+        )
+        .max(500)
     })
     .strict()
 } satisfies Record<AIStage, z.ZodType>;

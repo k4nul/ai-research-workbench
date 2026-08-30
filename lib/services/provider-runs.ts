@@ -3,6 +3,7 @@ import { getConfig } from "@/lib/config";
 import { query, withTransaction } from "@/lib/db";
 import {
   AI_STAGES,
+  aiStageInputSchemas,
   selectProviders,
   type AIExecutionResult,
   type AIStage,
@@ -31,13 +32,13 @@ export function isAiStage(value: unknown): value is AIStage {
   return typeof value === "string" && (AI_STAGES as readonly string[]).includes(value);
 }
 
-export async function runPersistedAiStage(input: {
-  stage: AIStage;
+export async function runPersistedAiStage<Stage extends AIStage>(input: {
+  stage: Stage;
   projectId: string;
   promptTemplateVersion: string;
   stageInput: unknown;
   allowedSourceIds: readonly string[];
-}): Promise<AIExecutionResult<AIStage>> {
+}): Promise<AIExecutionResult<Stage>> {
   const project = await query("SELECT id FROM research_projects WHERE id = $1", [
     input.projectId
   ]);
@@ -58,11 +59,13 @@ export async function runPersistedAiStage(input: {
 
   const selection = providers();
   const runId = randomUUID();
-  const request: AIStageRequest<AIStage> = {
+  const startedAt = new Date().toISOString();
+  const parsedStageInput = aiStageInputSchemas[input.stage].parse(input.stageInput);
+  const request: AIStageRequest<Stage> = {
     stage: input.stage,
     projectId: input.projectId,
     promptTemplateVersion: input.promptTemplateVersion,
-    input: input.stageInput as AIStageRequest<AIStage>["input"],
+    input: parsedStageInput as AIStageRequest<Stage>["input"],
     allowedSourceIds: input.allowedSourceIds
   };
   await query(
@@ -77,7 +80,9 @@ export async function runPersistedAiStage(input: {
       JSON.stringify({
         projectId: input.projectId,
         stage: input.stage,
-        allowedSourceIds: input.allowedSourceIds
+        allowedSourceIds: input.allowedSourceIds,
+        inputSnapshot: parsedStageInput,
+        startedAt
       })
     ]
   );
@@ -94,11 +99,30 @@ export async function runPersistedAiStage(input: {
           : result.error.code === "UNKNOWN_SOURCE_ID"
             ? "REJECTED"
             : "FAILED",
-        JSON.stringify({ inputHash: result.metadata.inputHash }),
+        JSON.stringify({
+          inputHash: result.metadata.inputHash,
+          startedAt: result.metadata.startedAt
+        }),
         JSON.stringify(
           result.success
-            ? { output: result.output }
-            : { errorMessage: result.error.message }
+            ? {
+                output: result.output,
+                provenance: {
+                  provider: result.metadata.provider,
+                  model: result.metadata.model,
+                  promptTemplateVersion: result.metadata.promptTemplateVersion,
+                  requestId: result.metadata.requestId ?? null
+                }
+              }
+            : {
+                errorMessage: result.error.message,
+                provenance: {
+                  provider: result.metadata.provider,
+                  model: result.metadata.model,
+                  promptTemplateVersion: result.metadata.promptTemplateVersion,
+                  requestId: result.metadata.requestId ?? null
+                }
+              }
         ),
         result.success ? null : result.error.code
       ]

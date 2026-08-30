@@ -33,21 +33,7 @@ export async function getCurrentDeliverable(
   if (result.rows[0]) {
     return result.rows[0];
   }
-  const project = await query<{ name: string }>(
-    "SELECT name FROM research_projects WHERE id = $1",
-    [projectId]
-  );
-  if (!project.rows[0]) {
-    throw notFound("Project");
-  }
-  return withTransaction(async (client) => {
-    const id = randomUUID();
-    const created = await client.query(
-      "INSERT INTO deliverables (id, project_id, version, title, sections) VALUES ($1, $2, 1, $3, $4::jsonb) RETURNING *",
-      [id, projectId, project.rows[0].name, JSON.stringify(emptyReportSections)]
-    );
-    return created.rows[0];
-  });
+  throw notFound("Deliverable");
 }
 
 export async function updateDeliverable(
@@ -56,6 +42,13 @@ export async function updateDeliverable(
 ): Promise<Record<string, unknown>> {
   const input = deliverableUpdateSchema.parse(rawInput);
   return withTransaction(async (client) => {
+    const project = await client.query(
+      "SELECT id FROM research_projects WHERE id = $1 FOR UPDATE",
+      [projectId]
+    );
+    if (!project.rowCount) {
+      throw notFound("Project");
+    }
     const current = await client.query<{
       id: string;
       sections: Record<string, string>;

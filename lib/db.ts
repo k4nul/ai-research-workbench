@@ -1,5 +1,9 @@
-import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
+import { Pool, types as pgTypes, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
 import { getConfig } from "@/lib/config";
+
+// PostgreSQL DATE has no timezone. Preserve its YYYY-MM-DD representation instead of
+// allowing node-postgres to convert it through the host timezone.
+pgTypes.setTypeParser(1082, (value) => value);
 
 const globalPool = globalThis as typeof globalThis & {
   researchWorkbenchPool?: Pool;

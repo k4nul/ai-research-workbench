@@ -40,12 +40,14 @@ export type ExportClaim = {
   importance: string;
   support_status: string;
   fact_or_inference: string;
+  within_scope: boolean;
   include_in_report: boolean;
   linked_evidence: Array<{
     evidenceId: string;
     summary: string;
     quote: string | null;
     relationship: string;
+    supportExtent: string;
     sourceId: string;
     sourceTitle: string;
   }>;
@@ -187,8 +189,10 @@ export function renderLedgerCsv(claims: ExportClaim[]): string {
       "importance",
       "support_status",
       "fact_or_inference",
+      "within_scope",
       "included",
       "relationship",
+      "support_extent",
       "evidence_id",
       "evidence_summary",
       "minimal_quote",
@@ -205,7 +209,9 @@ export function renderLedgerCsv(claims: ExportClaim[]): string {
         claim.importance,
         claim.support_status,
         claim.fact_or_inference,
+        claim.within_scope,
         claim.include_in_report,
+        "",
         "",
         "",
         "",
@@ -223,8 +229,10 @@ export function renderLedgerCsv(claims: ExportClaim[]): string {
         claim.importance,
         claim.support_status,
         claim.fact_or_inference,
+        claim.within_scope,
         claim.include_in_report,
         evidence.relationship,
+        evidence.supportExtent,
         evidence.evidenceId,
         evidence.summary,
         evidence.quote,

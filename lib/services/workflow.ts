@@ -5,9 +5,10 @@ import {
   researchQuestionSchema
 } from "@/lib/validation";
 import { writeAuditEvent } from "@/lib/services/audit";
-import { notFound } from "@/lib/services/errors";
+import { AppError, notFound } from "@/lib/services/errors";
 import { refreshProjectProgress } from "@/lib/services/progress";
 import { invalidateDownstreamReview } from "@/lib/services/review-state";
+import { runPersistedAiStage } from "@/lib/services/provider-runs";
 
 export async function addResearchQuestion(
   projectId: string,
@@ -18,6 +19,15 @@ export async function addResearchQuestion(
     const project = await client.query("SELECT id FROM research_projects WHERE id = $1", [projectId]);
     if (!project.rowCount) {
       throw notFound("Project");
+    }
+    if (input.parentId) {
+      const parent = await client.query(
+        "SELECT id FROM research_questions WHERE id = $1 AND project_id = $2",
+        [input.parentId, projectId]
+      );
+      if (!parent.rowCount) {
+        throw notFound("Parent research question");
+      }
     }
     const id = randomUUID();
     const result = await client.query(
@@ -32,6 +42,10 @@ export async function addResearchQuestion(
         input.researchGap ?? null,
         input.researchGap ? "OPEN" : "NONE"
       ]
+    );
+    await client.query(
+      "UPDATE research_projects SET plan_approved_at = NULL, updated_at = NOW() WHERE id = $1",
+      [projectId]
     );
     await invalidateDownstreamReview(client, projectId, "RESEARCHING");
     await writeAuditEvent(client, {
@@ -117,6 +131,10 @@ export async function addResearchPlan(
         input.aiSuggested
       ]
     );
+    await client.query(
+      "UPDATE research_projects SET plan_approved_at = NULL, updated_at = NOW() WHERE id = $1",
+      [projectId]
+    );
     await invalidateDownstreamReview(client, projectId, "RESEARCHING");
     await client.query(
       "UPDATE research_questions SET status = 'PLANNED', updated_at = NOW() WHERE id = $1 AND status = 'OPEN'",
@@ -136,7 +154,7 @@ export async function addResearchPlan(
   });
 }
 
-export async function generateDeterministicPlan(projectId: string): Promise<Record<string, unknown>> {
+export async function generateProviderPlan(projectId: string): Promise<Record<string, unknown>> {
   const projectResult = await query<{
     id: string;
     core_question: string;
@@ -147,41 +165,112 @@ export async function generateDeterministicPlan(projectId: string): Promise<Reco
   if (!project) {
     throw notFound("Project");
   }
-  const templates = [
-    {
-      question: "What evidence directly answers the core question?",
-      priority: "CRITICAL" as const,
-      completionCriteria: "At least two independent sources support or contest each key fact."
-    },
-    {
-      question: "Which credible sources disagree, and why?",
-      priority: "HIGH" as const,
-      completionCriteria: "All material conflicts are linked to claims and explicitly reconciled."
-    },
-    {
-      question: "What limitations or research gaps affect the conclusion?",
-      priority: "HIGH" as const,
-      completionCriteria: "All unresolved gaps are documented and accepted or resolved."
-    }
-  ];
-  const created: unknown[] = [];
-  for (const template of templates) {
-    const question = await addResearchQuestion(projectId, template);
-    const questionId = String(question.id);
-    const plan = await addResearchPlan(projectId, {
-      questionId,
-      searchStrategy: "Start with authoritative primary sources, then triangulate using independent secondary sources.",
-      searchQueries: [project.core_question, template.question],
-      primarySourceTypes: ["PRIMARY_GUIDANCE", "OFFICIAL_DATA"],
-      secondarySourceTypes: ["STUDY", "ANALYSIS"],
-      comparisonTargets: ["supporting evidence", "contradicting evidence"],
-      expectedOutput: "A cited answer, limitations, and any remaining gap.",
-      completionCondition: template.completionCriteria,
-      expectedRisks: ["source recency", "source concentration", "prompt injection"],
-      researchGap: undefined,
-      aiSuggested: true
+  let questions = await query<{ id: string; question: string }>(
+    "SELECT id, question FROM research_questions WHERE project_id = $1 ORDER BY created_at",
+    [projectId]
+  );
+  if (questions.rows.length === 0) {
+    const decomposition = await runPersistedAiStage({
+      stage: "question_decomposition",
+      projectId,
+      promptTemplateVersion: "question-decomposition.v1",
+      stageInput: {
+        coreQuestion: project.core_question,
+        scope: project.scope,
+        completionCriteria: ["Every material answer is linked to verified evidence."]
+      },
+      allowedSourceIds: []
     });
+    if (!decomposition.success) {
+      throw new AppError(502, decomposition.error.code, decomposition.error.message);
+    }
+    const questionInputs = decomposition.output.questions.map((suggestion) => ({
+      question: suggestion.question,
+      priority: suggestion.priority,
+      completionCriteria: suggestion.completionCriteria.join(" ")
+    }));
+    const parsedQuestionInputs = researchQuestionSchema.array().safeParse(questionInputs);
+    if (!parsedQuestionInputs.success) {
+      throw new AppError(
+        502,
+        "INVALID_AI_RESPONSE",
+        "The AI questions did not meet the research question requirements."
+      );
+    }
+    for (const input of parsedQuestionInputs.data) {
+      await addResearchQuestion(projectId, input);
+    }
+    questions = await query<{ id: string; question: string }>(
+      "SELECT id, question FROM research_questions WHERE project_id = $1 ORDER BY created_at",
+      [projectId]
+    );
+  }
+
+  const generatedPlan = await runPersistedAiStage({
+    stage: "research_plan",
+    projectId,
+    promptTemplateVersion: "research-plan.v1",
+    stageInput: {
+      questions: questions.rows,
+      constraints: [project.scope, project.exclusions?.trim() || "No additional exclusions."]
+    },
+    allowedSourceIds: []
+  });
+  if (!generatedPlan.success) {
+    throw new AppError(502, generatedPlan.error.code, generatedPlan.error.message);
+  }
+  const questionById = new Map(questions.rows.map((question) => [question.id, question]));
+  const returnedQuestionIds = generatedPlan.output.steps.map((step) => step.questionId);
+  if (
+    returnedQuestionIds.length !== questionById.size ||
+    new Set(returnedQuestionIds).size !== returnedQuestionIds.length ||
+    returnedQuestionIds.some((questionId) => !questionById.has(questionId))
+  ) {
+    throw new AppError(
+      502,
+      "INVALID_AI_RESPONSE",
+      "The AI plan must contain exactly one step for every project question."
+    );
+  }
+  const planInputs = generatedPlan.output.steps.map((step) => ({
+    questionId: step.questionId,
+    searchStrategy: step.searchStrategy,
+    searchQueries: step.queries,
+    primarySourceTypes: step.primarySourceTypes,
+    secondarySourceTypes: step.secondarySourceTypes,
+    comparisonTargets: step.comparisonTargets,
+    expectedOutput: step.expectedOutput,
+    completionCondition: step.completionCondition,
+    expectedRisks: step.risks,
+    researchGap: step.researchGap ?? undefined,
+    aiSuggested: true
+  }));
+  const parsedPlanInputs = researchPlanSchema.array().safeParse(planInputs);
+  if (!parsedPlanInputs.success) {
+    throw new AppError(
+      502,
+      "INVALID_AI_RESPONSE",
+      "The AI plan did not meet the research plan requirements."
+    );
+  }
+  const created: unknown[] = [];
+  for (const input of parsedPlanInputs.data) {
+    const question = questionById.get(input.questionId);
+    if (!question) {
+      throw new AppError(
+        502,
+        "INVALID_AI_RESPONSE",
+        "The AI plan referenced a question outside this project."
+      );
+    }
+    const plan = await addResearchPlan(projectId, input);
     created.push({ question, plan });
   }
-  return { projectId, items: created, provider: "mock", deterministic: true };
+  return {
+    projectId,
+    items: created,
+    provider: generatedPlan.metadata.provider,
+    model: generatedPlan.metadata.model,
+    aiRunInputHash: generatedPlan.metadata.inputHash
+  };
 }

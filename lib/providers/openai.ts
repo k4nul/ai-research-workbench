@@ -29,7 +29,7 @@ const STAGE_INSTRUCTIONS: Readonly<Record<AIStage, string>> = {
   gap_detection: "Identify unanswered questions and unsupported research gaps.",
   conflict_detection: "Identify material conflicts between supplied sources without hiding disagreement.",
   report_outline: "Create an evidence-backed report outline tied to supplied claims and sources.",
-  draft_generation: "Draft a report using only supplied claims. Format every inline citation as [source:SOURCE_ID] and use only allowed source IDs.",
+  draft_generation: "Draft a report using only supplied claims. Format every inline citation as [@SOURCE_ID] and use only allowed source IDs.",
   qa_revision: "Recommend revisions for the supplied QA findings without silently removing limitations."
 };
 

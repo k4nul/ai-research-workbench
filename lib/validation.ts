@@ -20,6 +20,20 @@ export const projectIntakeSchema = z.object({
   deliverableFormats: z
     .array(z.enum(["MARKDOWN", "HTML", "PDF", "DOCX", "CSV", "ZIP"]))
     .min(1)
+    .max(6)
+    .superRefine((formats, context) => {
+      const seen = new Set<string>();
+      formats.forEach((format, index) => {
+        if (seen.has(format)) {
+          context.addIssue({
+            code: "custom",
+            message: "Deliverable formats must be unique.",
+            path: [index]
+          });
+        }
+        seen.add(format);
+      });
+    })
     .default(["MARKDOWN", "HTML", "PDF", "DOCX", "ZIP"]),
   specialRequirements: z.string().trim().max(10_000).default("")
 });
@@ -73,7 +87,8 @@ export const evidenceInputSchema = z.object({
   originalLocation: z.string().trim().max(1_000).optional(),
   pageOrSection: z.string().trim().max(500).optional(),
   confidence: z.enum(["HIGH", "MEDIUM", "LOW"]).default("MEDIUM"),
-  verificationStatus: z.enum(["PENDING", "VERIFIED", "REJECTED"]).default("PENDING")
+  verificationStatus: z.enum(["PENDING", "VERIFIED", "REJECTED"]).default("PENDING"),
+  supportExtent: z.enum(["FULL", "PARTIAL"]).default("FULL")
 });
 
 export const claimInputSchema = z.object({
@@ -82,6 +97,8 @@ export const claimInputSchema = z.object({
   claimType: z.enum(["FACT", "INTERPRETATION", "INFERENCE", "RECOMMENDATION"]),
   importance: z.enum(["CRITICAL", "HIGH", "MEDIUM", "LOW"]).default("MEDIUM"),
   factOrInference: z.enum(["FACT", "INFERENCE"]),
+  verificationPossible: z.boolean().default(true),
+  withinScope: z.boolean().default(true),
   includeInReport: z.boolean().default(true),
   resolutionNotes: z.string().trim().max(4_000).optional()
 });
@@ -93,6 +110,17 @@ export const claimEvidenceLinkSchema = z.object({
   notes: z.string().trim().max(2_000).optional()
 });
 
+export const claimReviewUpdateSchema = z
+  .object({
+    includeInReport: z.boolean().optional(),
+    withinScope: z.boolean().optional(),
+    resolutionNotes: z.string().trim().min(3).max(4_000).nullable().optional()
+  })
+  .refine(
+    (value) => value.includeInReport !== undefined || value.withinScope !== undefined || value.resolutionNotes !== undefined,
+    { message: "Provide a report-inclusion, scope, or resolution decision." }
+  );
+
 export const findingInputSchema = z.object({
   questionId: z.string().trim().min(1).optional(),
   finding: z.string().trim().min(3).max(20_000),
@@ -100,7 +128,7 @@ export const findingInputSchema = z.object({
   impact: z.string().trim().max(10_000).optional(),
   limitations: z.string().trim().max(10_000).optional(),
   canInformRecommendation: z.boolean().default(false),
-  claimIds: z.array(z.string().trim().min(1)).default([])
+  claimIds: z.array(z.string().trim().min(1)).min(1, "Link at least one claim.").max(200)
 });
 
 export const reportSectionsSchema = z.object({

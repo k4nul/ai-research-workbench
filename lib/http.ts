@@ -9,7 +9,10 @@ export async function handleRoute<T>(
 ): Promise<NextResponse> {
   try {
     const data = await operation();
-    return NextResponse.json({ data }, { status: options.status ?? 200 });
+    return NextResponse.json(
+      { data },
+      { status: options.status ?? 200, headers: noStoreJsonHeaders() }
+    );
   } catch (error) {
     return routeErrorResponse(error);
   }
@@ -19,13 +22,13 @@ export function routeErrorResponse(error: unknown): NextResponse {
   if (error instanceof ZodError) {
     return NextResponse.json(
       { error: formatValidationError(error) },
-      { status: 400 }
+      { status: 400, headers: noStoreJsonHeaders() }
     );
   }
   if (error instanceof SyntaxError) {
     return NextResponse.json(
       { error: { code: "INVALID_JSON", message: "The request body is not valid JSON." } },
-      { status: 400 }
+      { status: 400, headers: noStoreJsonHeaders() }
     );
   }
   if (error instanceof AppError) {
@@ -37,7 +40,7 @@ export function routeErrorResponse(error: unknown): NextResponse {
           details: error.details
         }
       },
-      { status: error.status }
+      { status: error.status, headers: noStoreJsonHeaders() }
     );
   }
   const reference = crypto.randomUUID();
@@ -50,7 +53,7 @@ export function routeErrorResponse(error: unknown): NextResponse {
         reference
       }
     },
-    { status: 500 }
+    { status: 500, headers: noStoreJsonHeaders() }
   );
 }
 

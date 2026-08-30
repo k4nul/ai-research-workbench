@@ -1,12 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
+import path from "node:path";
 import type { PoolClient } from "pg";
 import { query, withTransaction } from "@/lib/db";
-import { projectIntakeSchema, type ProjectIntake } from "@/lib/validation";
+import { getConfig } from "@/lib/config";
+import { projectIntakeSchema, reportSectionsSchema, type ProjectIntake } from "@/lib/validation";
 import { projectScopeUpdateSchema } from "@/lib/validation";
 import { writeAuditEvent } from "@/lib/services/audit";
-import { notFound } from "@/lib/services/errors";
+import { AppError, conflict, notFound } from "@/lib/services/errors";
 import { assessSourceFreshness } from "@/lib/domain/research";
 import { refreshProjectProgress } from "@/lib/services/progress";
+import { invalidateDownstreamReview } from "@/lib/services/review-state";
+import { refreshProjectClaimSupport } from "@/lib/services/ledger";
 
 type ProjectRow = {
   id: string;
@@ -95,6 +100,7 @@ export async function createProject(rawInput: unknown): Promise<ProjectRow> {
     const workspaceId = await ensureDefaultWorkspace(client);
     const clientId = await resolveClient(client, workspaceId, input);
     const id = randomUUID();
+    const deliverableId = randomUUID();
     await client.query(
       "INSERT INTO research_projects (id, workspace_id, client_id, name, core_question, background, purpose, audience, scope, exclusions, jurisdiction, research_date, source_max_age_days, deadline, deliverable_formats, special_requirements) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
       [
@@ -116,6 +122,10 @@ export async function createProject(rawInput: unknown): Promise<ProjectRow> {
         input.specialRequirements || null
       ]
     );
+    await client.query(
+      "INSERT INTO deliverables (id, project_id, version, title, sections) VALUES ($1, $2, 1, $3, $4::jsonb)",
+      [deliverableId, id, input.name, JSON.stringify(reportSectionsSchema.parse({}))]
+    );
     await writeAuditEvent(client, {
       projectId: id,
       actorType: "USER",
@@ -123,7 +133,7 @@ export async function createProject(rawInput: unknown): Promise<ProjectRow> {
       action: "PROJECT_CREATED",
       resourceType: "research_project",
       resourceId: id,
-      afterState: { name: input.name, mode: input.mode }
+      afterState: { name: input.name, mode: input.mode, deliverableId }
     });
     const created = await client.query<ProjectRow>(
       projectSelect + " WHERE p.id = $1",
@@ -217,6 +227,8 @@ export async function updateProjectScope(
         [source.id, freshness]
       );
     }
+    await refreshProjectClaimSupport(client, projectId);
+    await invalidateDownstreamReview(client, projectId, "RESEARCHING");
     await writeAuditEvent(client, {
       projectId,
       actorType: "USER",
@@ -294,6 +306,12 @@ export async function approveScope(projectId: string): Promise<ProjectRow> {
     if (!before.rows[0]) {
       throw notFound("Project");
     }
+    if (!["INTAKE", "SCOPING"].includes(before.rows[0].status)) {
+      throw conflict(
+        "INVALID_PROJECT_STATE",
+        "Scope approval is only allowed during intake or scoping."
+      );
+    }
     await client.query(
       "UPDATE research_projects SET scope_approved_at = NOW(), status = 'PLANNING', updated_at = NOW() WHERE id = $1",
       [projectId]
@@ -323,6 +341,15 @@ export async function approvePlan(projectId: string, planId?: string): Promise<P
     if (!project.rows[0]) {
       throw notFound("Project");
     }
+    if (!["PLANNING", "RESEARCHING"].includes(project.rows[0].status)) {
+      throw conflict(
+        "INVALID_PROJECT_STATE",
+        "Plan approval is only allowed during planning or research."
+      );
+    }
+    if (!project.rows[0].scope_approved_at) {
+      throw conflict("SCOPE_APPROVAL_REQUIRED", "Approve the scope before approving a plan.");
+    }
     if (planId) {
       const updated = await client.query(
         "UPDATE research_plans SET human_approved = TRUE, approved_at = NOW(), updated_at = NOW() WHERE id = $1 AND project_id = $2",
@@ -337,14 +364,28 @@ export async function approvePlan(projectId: string, planId?: string): Promise<P
         [projectId]
       );
     }
-    const unapproved = await client.query<{ count: string }>(
-      "SELECT COUNT(*)::text AS count FROM research_plans WHERE project_id = $1 AND human_approved = FALSE",
+    const planReadiness = await client.query<{
+      question_count: string;
+      missing_plan_count: string;
+      unapproved_count: string;
+    }>(
+      "SELECT COUNT(*)::text AS question_count, COUNT(*) FILTER (WHERE rp.id IS NULL)::text AS missing_plan_count, COUNT(*) FILTER (WHERE rp.id IS NOT NULL AND rp.human_approved = FALSE)::text AS unapproved_count FROM research_questions rq LEFT JOIN research_plans rp ON rp.question_id = rq.id AND rp.project_id = rq.project_id WHERE rq.project_id = $1",
       [projectId]
     );
-    if (Number(unapproved.rows[0].count) === 0) {
+    const readiness = planReadiness.rows[0];
+    if (
+      Number(readiness.question_count) > 0 &&
+      Number(readiness.missing_plan_count) === 0 &&
+      Number(readiness.unapproved_count) === 0
+    ) {
       await client.query(
         "UPDATE research_projects SET plan_approved_at = NOW(), status = 'RESEARCHING', updated_at = NOW() WHERE id = $1",
         [projectId]
+      );
+    } else if (!planId) {
+      throw conflict(
+        "PLAN_INCOMPLETE",
+        "Every research question must have a human-approved plan."
       );
     }
     await writeAuditEvent(client, {
@@ -362,7 +403,7 @@ export async function approvePlan(projectId: string, planId?: string): Promise<P
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
-  await withTransaction(async (client) => {
+  const projectName = await withTransaction(async (client) => {
     const project = await client.query<{ name: string }>(
       "SELECT name FROM research_projects WHERE id = $1 FOR UPDATE",
       [projectId]
@@ -371,7 +412,45 @@ export async function deleteProject(projectId: string): Promise<void> {
       throw notFound("Project");
     }
     await client.query("DELETE FROM research_projects WHERE id = $1", [projectId]);
+    await writeAuditEvent(client, {
+      actorType: "USER",
+      actorLabel: "Local user",
+      action: "PROJECT_DELETED",
+      resourceType: "research_project",
+      resourceId: projectId,
+      beforeState: { name: project.rows[0].name }
+    });
+    return project.rows[0].name;
   });
+  const storageRoot = path.resolve(getConfig().storageDir);
+  const targets = ["uploads", "exports"].map((category) => {
+    const categoryRoot = path.resolve(storageRoot, category);
+    const target = path.resolve(categoryRoot, projectId);
+    if (!target.startsWith(categoryRoot + path.sep)) {
+      throw new AppError(500, "STORAGE_PATH_INVALID", "Project storage path validation failed.");
+    }
+    return target;
+  });
+  try {
+    await Promise.all(targets.map((target) => rm(target, { recursive: true, force: true })));
+  } catch (error) {
+    await withTransaction((client) =>
+      writeAuditEvent(client, {
+        actorType: "SYSTEM",
+        actorLabel: "Storage cleanup",
+        action: "PROJECT_STORAGE_DELETE_FAILED",
+        resourceType: "research_project",
+        resourceId: projectId,
+        beforeState: { name: projectName },
+        afterState: { error: error instanceof Error ? error.message : "Unknown cleanup error" }
+      })
+    );
+    throw new AppError(
+      500,
+      "STORAGE_DELETE_FAILED",
+      "The project database record was deleted, but private file cleanup failed."
+    );
+  }
 }
 
 export async function getDashboard(): Promise<Record<string, unknown>> {

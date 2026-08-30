@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ZipArchive } from "archiver";
 import {
@@ -10,7 +10,7 @@ import {
   TextRun
 } from "docx";
 import PDFDocument from "pdfkit";
-import { query, withTransaction } from "@/lib/db";
+import { withTransaction } from "@/lib/db";
 import { getConfig } from "@/lib/config";
 import { conflict, notFound } from "@/lib/services/errors";
 import { writeAuditEvent } from "@/lib/services/audit";
@@ -35,44 +35,97 @@ export type GeneratedArtifact = {
   buffer: Buffer;
 };
 
-type ExportData = {
+export type ExportSnapshot = {
+  projectUpdatedAt: string;
+  approvalStatus: string;
+  qaPassedAt: string | null;
+  approvedAt: string | null;
+  deliverableId: string;
+  deliverableUpdatedAt: string;
+};
+
+export type ExportData = {
   project: ExportProject;
   deliverable: ExportDeliverable;
   sources: ExportSource[];
   claims: ExportClaim[];
   qaFindings: Record<string, unknown>[];
+  snapshot: ExportSnapshot;
 };
 
-async function loadExportData(projectId: string): Promise<ExportData> {
-  const [project, deliverable, sources, claims, qaFindings] = await Promise.all([
-    query<ExportProject>("SELECT * FROM research_projects WHERE id = $1", [projectId]),
-    query<ExportDeliverable>(
-      "SELECT * FROM deliverables WHERE project_id = $1 ORDER BY version DESC LIMIT 1",
+export async function loadExportData(
+  projectId: string,
+  requireApproval = false
+): Promise<ExportData> {
+  return withTransaction(async (client) => {
+    const lockedProject = await client.query<{
+      updated_at: string;
+      approval_status: string;
+      qa_passed_at: string | null;
+      approved_at: string | null;
+    }>(
+      "SELECT updated_at::text, approval_status, qa_passed_at::text, approved_at::text FROM research_projects WHERE id = $1 FOR UPDATE",
       [projectId]
-    ),
-    query<ExportSource>("SELECT * FROM sources WHERE project_id = $1 ORDER BY id", [projectId]),
-    query<ExportClaim>(
-      "SELECT c.*, COALESCE(json_agg(json_build_object('evidenceId', e.id, 'summary', e.summary, 'quote', e.minimal_quote, 'relationship', ce.relationship, 'sourceId', s.id, 'sourceTitle', s.title)) FILTER (WHERE e.id IS NOT NULL), '[]'::json) AS linked_evidence FROM claims c LEFT JOIN claim_evidence ce ON ce.claim_id = c.id LEFT JOIN evidence e ON e.id = ce.evidence_id LEFT JOIN sources s ON s.id = e.source_id WHERE c.project_id = $1 GROUP BY c.id ORDER BY c.id",
+    );
+    if (!lockedProject.rows[0]) {
+      throw notFound("Project");
+    }
+    const project = await client.query<ExportProject>(
+      "SELECT * FROM research_projects WHERE id = $1",
       [projectId]
-    ),
-    query<Record<string, unknown>>(
+    );
+    const deliverable = await client.query<ExportDeliverable & { updated_at_text: string }>(
+      "SELECT d.*, d.updated_at::text AS updated_at_text FROM deliverables d WHERE d.project_id = $1 ORDER BY d.version DESC LIMIT 1",
+      [projectId]
+    );
+    const sources = await client.query<ExportSource>(
+      "SELECT * FROM sources WHERE project_id = $1 ORDER BY id",
+      [projectId]
+    );
+    const claims = await client.query<ExportClaim>(
+      "SELECT c.*, COALESCE(json_agg(json_build_object('evidenceId', e.id, 'summary', e.summary, 'quote', e.minimal_quote, 'relationship', ce.relationship, 'supportExtent', e.support_extent, 'sourceId', s.id, 'sourceTitle', s.title)) FILTER (WHERE e.id IS NOT NULL), '[]'::json) AS linked_evidence FROM claims c LEFT JOIN claim_evidence ce ON ce.claim_id = c.id LEFT JOIN evidence e ON e.id = ce.evidence_id LEFT JOIN sources s ON s.id = e.source_id WHERE c.project_id = $1 GROUP BY c.id ORDER BY c.id",
+      [projectId]
+    );
+    const qaFindings = await client.query<Record<string, unknown>>(
       "SELECT rule_code, severity, location, problem, remediation, resolution_status, created_at, resolved_at FROM qa_findings WHERE project_id = $1 ORDER BY created_at",
       [projectId]
-    )
-  ]);
-  if (!project.rows[0]) {
-    throw notFound("Project");
-  }
-  if (!deliverable.rows[0]) {
-    throw conflict("NO_DELIVERABLE", "Create and save a report before exporting.");
-  }
-  return {
-    project: project.rows[0],
-    deliverable: deliverable.rows[0],
-    sources: sources.rows,
-    claims: claims.rows,
-    qaFindings: qaFindings.rows
-  };
+    );
+    const blockers = await client.query<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM qa_findings WHERE project_id = $1 AND severity = 'BLOCKER' AND resolution_status <> 'RESOLVED'",
+      [projectId]
+    );
+    const deliverableRow = deliverable.rows[0];
+    if (!deliverableRow) {
+      throw conflict("NO_DELIVERABLE", "Create and save a report before exporting.");
+    }
+    if (requireApproval) {
+      if (lockedProject.rows[0].approval_status !== "APPROVED") {
+        throw conflict(
+          "APPROVAL_REQUIRED",
+          "Explicit human approval is required before final export."
+        );
+      }
+      if (Number(blockers.rows[0].count) > 0) {
+        throw conflict("QA_BLOCKED", "Resolve all QA blockers before final export.");
+      }
+    }
+    const { updated_at_text: deliverableUpdatedAt, ...exportDeliverable } = deliverableRow;
+    return {
+      project: project.rows[0],
+      deliverable: exportDeliverable,
+      sources: sources.rows,
+      claims: claims.rows,
+      qaFindings: qaFindings.rows,
+      snapshot: {
+        projectUpdatedAt: lockedProject.rows[0].updated_at,
+        approvalStatus: lockedProject.rows[0].approval_status,
+        qaPassedAt: lockedProject.rows[0].qa_passed_at,
+        approvedAt: lockedProject.rows[0].approved_at,
+        deliverableId: deliverableRow.id,
+        deliverableUpdatedAt
+      }
+    };
+  });
 }
 
 async function locatePdfFont(): Promise<string | undefined> {
@@ -278,22 +331,8 @@ export async function generateArtifact(
   format: ExportFormat,
   options: { persist?: boolean; requireApproval?: boolean } = {}
 ): Promise<GeneratedArtifact> {
-  const data = await loadExportData(projectId);
-  if ((options.requireApproval || format === "ZIP") && data.project) {
-    const gate = await query<{
-      approval_status: string;
-      blocker_count: string;
-    }>(
-      "SELECT p.approval_status, COUNT(q.id) FILTER (WHERE q.severity = 'BLOCKER' AND q.resolution_status <> 'RESOLVED')::text AS blocker_count FROM research_projects p LEFT JOIN qa_findings q ON q.project_id = p.id WHERE p.id = $1 GROUP BY p.id",
-      [projectId]
-    );
-    if (gate.rows[0]?.approval_status !== "APPROVED") {
-      throw conflict("APPROVAL_REQUIRED", "Explicit human approval is required before final export.");
-    }
-    if (Number(gate.rows[0].blocker_count) > 0) {
-      throw conflict("QA_BLOCKED", "Resolve all QA blockers before final export.");
-    }
-  }
+  const requireApproval = options.requireApproval || format === "ZIP";
+  const data = await loadExportData(projectId, requireApproval);
 
   let buffer: Buffer;
   switch (format) {
@@ -319,15 +358,16 @@ export async function generateArtifact(
   const descriptor = artifactName(format);
   const artifact = { format, ...descriptor, buffer };
   if (options.persist || format === "ZIP") {
-    await persistArtifact(projectId, data.deliverable.id, artifact);
+    await persistArtifact(projectId, data.snapshot, artifact, requireApproval);
   }
   return artifact;
 }
 
-async function persistArtifact(
+export async function persistArtifact(
   projectId: string,
-  deliverableId: string,
-  artifact: GeneratedArtifact
+  snapshot: ExportSnapshot,
+  artifact: GeneratedArtifact,
+  requireApproval = false
 ): Promise<void> {
   const root = path.resolve(getConfig().storageDir, "exports");
   const projectDirectory = path.resolve(root, projectId);
@@ -336,39 +376,97 @@ async function persistArtifact(
   }
   await mkdir(projectDirectory, { recursive: true, mode: 0o700 });
   const versionedName =
-    new Date().toISOString().replaceAll(":", "-") + "-" + artifact.filename;
+    new Date().toISOString().replaceAll(":", "-") +
+    "-" +
+    randomUUID() +
+    "-" +
+    artifact.filename;
   const outputPath = path.resolve(projectDirectory, versionedName);
   if (!outputPath.startsWith(projectDirectory + path.sep)) {
     throw new Error("Artifact path escaped the project export directory.");
   }
-  await writeFile(outputPath, artifact.buffer, { mode: 0o600 });
   const sha256 = createHash("sha256").update(artifact.buffer).digest("hex");
-  await withTransaction(async (client) => {
-    await client.query(
-      "INSERT INTO project_exports (id, project_id, deliverable_id, format, storage_path, sha256, byte_size) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-      [
-        randomUUID(),
-        projectId,
-        deliverableId,
-        artifact.format,
-        outputPath,
-        sha256,
-        artifact.buffer.byteLength
-      ]
-    );
-    await writeAuditEvent(client, {
-      projectId,
-      actorType: "SYSTEM",
-      actorLabel: "Export service",
-      action: "EXPORT_GENERATED",
-      resourceType: "project_export",
-      afterState: {
-        format: artifact.format,
-        filename: versionedName,
-        sha256,
-        byteSize: artifact.buffer.byteLength
+  let committed = false;
+  try {
+    await withTransaction(async (client) => {
+      const project = await client.query<{
+        updated_at: string;
+        approval_status: string;
+        qa_passed_at: string | null;
+        approved_at: string | null;
+      }>(
+        "SELECT updated_at::text, approval_status, qa_passed_at::text, approved_at::text FROM research_projects WHERE id = $1 FOR UPDATE",
+        [projectId]
+      );
+      if (!project.rows[0]) {
+        throw notFound("Project");
       }
+      const deliverable = await client.query<{ id: string; updated_at: string }>(
+        "SELECT id, updated_at::text FROM deliverables WHERE project_id = $1 ORDER BY version DESC LIMIT 1",
+        [projectId]
+      );
+      const current = project.rows[0];
+      const currentDeliverable = deliverable.rows[0];
+      const changed =
+        current.updated_at !== snapshot.projectUpdatedAt ||
+        current.approval_status !== snapshot.approvalStatus ||
+        current.qa_passed_at !== snapshot.qaPassedAt ||
+        current.approved_at !== snapshot.approvedAt ||
+        currentDeliverable?.id !== snapshot.deliverableId ||
+        currentDeliverable?.updated_at !== snapshot.deliverableUpdatedAt;
+      if (changed) {
+        throw conflict(
+          "EXPORT_STALE",
+          "The project changed while the artifact was generated. Generate it again."
+        );
+      }
+      if (requireApproval) {
+        if (current.approval_status !== "APPROVED") {
+          throw conflict(
+            "APPROVAL_REQUIRED",
+            "Explicit human approval is required before final export."
+          );
+        }
+        const blockers = await client.query<{ count: string }>(
+          "SELECT COUNT(*)::text AS count FROM qa_findings WHERE project_id = $1 AND severity = 'BLOCKER' AND resolution_status <> 'RESOLVED'",
+          [projectId]
+        );
+        if (Number(blockers.rows[0].count) > 0) {
+          throw conflict("QA_BLOCKED", "Resolve all QA blockers before final export.");
+        }
+      }
+      await writeFile(outputPath, artifact.buffer, { mode: 0o600 });
+      await client.query(
+        "INSERT INTO project_exports (id, project_id, deliverable_id, format, storage_path, sha256, byte_size) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        [
+          randomUUID(),
+          projectId,
+          snapshot.deliverableId,
+          artifact.format,
+          outputPath,
+          sha256,
+          artifact.buffer.byteLength
+        ]
+      );
+      await writeAuditEvent(client, {
+        projectId,
+        actorType: "SYSTEM",
+        actorLabel: "Export service",
+        action: "EXPORT_GENERATED",
+        resourceType: "project_export",
+        afterState: {
+          format: artifact.format,
+          filename: versionedName,
+          sha256,
+          byteSize: artifact.buffer.byteLength
+        }
+      });
+      await refreshProjectProgress(client, projectId);
     });
-    await refreshProjectProgress(client, projectId);
-  });
+    committed = true;
+  } finally {
+    if (!committed) {
+      await rm(outputPath, { force: true });
+    }
+  }
 }

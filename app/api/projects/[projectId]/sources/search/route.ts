@@ -4,9 +4,9 @@ import { searchAndRegisterSources } from "@/lib/services/ingestion";
 type Context = { params: Promise<{ projectId: string }> };
 
 export async function POST(request: Request, context: Context) {
-  enforceRateLimit(request, "source-search", 10);
   const { projectId } = await context.params;
-  return handleRoute(async () =>
-    searchAndRegisterSources(projectId, await request.json())
-  );
+  return handleRoute(async () => {
+    enforceRateLimit(request, "source-search", 10);
+    return searchAndRegisterSources(projectId, await request.json());
+  });
 }

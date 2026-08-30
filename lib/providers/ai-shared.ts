@@ -30,7 +30,7 @@ export function sourceIdsIn(value: unknown): readonly string[] {
       typeof item === "string" &&
       (parentKey === "markdown" || parentKey === "revisedText")
     ) {
-      for (const match of item.matchAll(/\[(?:source:|@)([^\]\s]+)\]/gi)) {
+      for (const match of item.matchAll(/\[(?:source:|@)?([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\](?!\()/gi)) {
         found.push(match[1]);
       }
       return;
@@ -84,5 +84,17 @@ export function parseStageOutput<Stage extends AIStage>(
   stage: Stage,
   value: unknown
 ): AIStageOutputMap[Stage] {
-  return aiStageOutputSchemas[stage].parse(value) as AIStageOutputMap[Stage];
+  const parsed = aiStageOutputSchemas[stage].parse(value) as AIStageOutputMap[Stage];
+  if (stage === "draft_generation") {
+    const draft = parsed as AIStageOutputMap["draft_generation"];
+    const citedInMarkdown = new Set(sourceIdsIn({ markdown: draft.markdown }));
+    const declaredCitations = new Set(draft.citationSourceIds);
+    if (
+      citedInMarkdown.size !== declaredCitations.size ||
+      [...citedInMarkdown].some((sourceId) => !declaredCitations.has(sourceId))
+    ) {
+      throw new Error("Draft citations must exactly match citationSourceIds");
+    }
+  }
+  return parsed;
 }

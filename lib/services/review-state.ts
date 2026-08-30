@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { refreshProjectProgress } from "@/lib/services/progress";
 
 export async function invalidateDownstreamReview(
   client: PoolClient,
@@ -13,4 +14,9 @@ export async function invalidateDownstreamReview(
     "UPDATE deliverables SET approval_status = CASE WHEN approval_status = 'APPROVED' THEN 'REVIEW' ELSE approval_status END, updated_at = NOW() WHERE project_id = $1",
     [projectId]
   );
+  await client.query(
+    "UPDATE project_exports SET is_current = FALSE WHERE project_id = $1 AND is_current = TRUE",
+    [projectId]
+  );
+  await refreshProjectProgress(client, projectId);
 }

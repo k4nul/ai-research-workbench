@@ -22,9 +22,9 @@ export async function GET(_request: Request, context: Context) {
 }
 
 export async function POST(request: Request, context: Context) {
-  enforceRateLimit(request, "ai-pipeline", 10);
   const { projectId } = await context.params;
   return handleRoute(async () => {
+    enforceRateLimit(request, "ai-pipeline", 10);
     const input = runSchema.parse(await request.json());
     if (!isAiStage(input.stage)) {
       throw new AppError(400, "INVALID_AI_STAGE", "The requested AI pipeline stage is unknown.");

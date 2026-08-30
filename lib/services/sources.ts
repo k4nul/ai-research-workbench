@@ -8,27 +8,12 @@ import {
 import { writeAuditEvent } from "@/lib/services/audit";
 import { notFound } from "@/lib/services/errors";
 import { invalidateDownstreamReview } from "@/lib/services/review-state";
-
-function freshnessStatus(
-  publishedAt: string | undefined,
-  researchDate: string,
-  maxAgeDays: number
-): "CURRENT" | "AGING" | "OUTDATED" | "UNKNOWN" {
-  if (!publishedAt) {
-    return "UNKNOWN";
-  }
-  const ageDays = Math.floor(
-    (Date.parse(researchDate + "T00:00:00Z") - Date.parse(publishedAt + "T00:00:00Z")) /
-      86_400_000
-  );
-  if (ageDays > maxAgeDays) {
-    return "OUTDATED";
-  }
-  if (ageDays > maxAgeDays * 0.8) {
-    return "AGING";
-  }
-  return "CURRENT";
-}
+import { assessSourceFreshness } from "@/lib/domain/research";
+import {
+  assessPromptInjection,
+  externalHtmlToText,
+  sanitizeExternalHtml
+} from "@/lib/security/content";
 
 export async function addSource(
   projectId: string,
@@ -56,8 +41,17 @@ export async function addSource(
       }
     }
     const id = randomUUID();
-    const contentHash = input.sanitizedContent
-      ? createHash("sha256").update(input.sanitizedContent).digest("hex")
+    const contentLooksLikeHtml =
+      input.sanitizedContent !== undefined &&
+      (input.mimeType?.toLowerCase().includes("html") === true ||
+        /<!doctype\s+html|<\/?[a-z][^>]*>/i.test(input.sanitizedContent));
+    const sanitizedContent =
+      input.sanitizedContent && contentLooksLikeHtml
+        ? externalHtmlToText(sanitizeExternalHtml(input.sanitizedContent))
+        : input.sanitizedContent;
+    const injection = assessPromptInjection(sanitizedContent ?? "");
+    const contentHash = sanitizedContent
+      ? createHash("sha256").update(sanitizedContent).digest("hex")
       : null;
     const duplicate = contentHash
       ? await client.query<{ id: string }>(
@@ -65,13 +59,13 @@ export async function addSource(
           [projectId, contentHash]
         )
       : { rows: [] };
-    const freshness = freshnessStatus(
-      input.publishedAt,
-      project.rows[0].research_date,
-      project.rows[0].source_max_age_days
-    );
+    const freshness = assessSourceFreshness({
+      publishedAt: input.publishedAt,
+      researchDate: project.rows[0].research_date,
+      maxAgeDays: project.rows[0].source_max_age_days
+    });
     const result = await client.query(
-      "INSERT INTO sources (id, project_id, reused_from_source_id, url, title, publisher, author, published_at, source_type, language, reliability_grade, freshness_status, duplicate_of_source_id, content_hash, usage_restrictions, ingestion_method, mime_type, content_summary, sanitized_content) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING *",
+      "INSERT INTO sources (id, project_id, reused_from_source_id, url, title, publisher, author, published_at, source_type, language, reliability_grade, freshness_status, duplicate_of_source_id, content_hash, usage_restrictions, ingestion_method, mime_type, content_summary, sanitized_content, prompt_injection_flag) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING *",
       [
         id,
         projectId,
@@ -91,7 +85,8 @@ export async function addSource(
         input.ingestionMethod,
         input.mimeType ?? null,
         input.contentSummary ?? null,
-        input.sanitizedContent ?? null
+        sanitizedContent ?? null,
+        injection.flagged
       ]
     );
     await invalidateDownstreamReview(client, projectId, "RESEARCHING");
@@ -106,7 +101,9 @@ export async function addSource(
         title: input.title,
         ingestionMethod: input.ingestionMethod,
         duplicateOf: duplicate.rows[0]?.id,
-        freshness
+        freshness,
+        promptInjectionFlag: injection.flagged,
+        promptInjectionIndicators: injection.indicators
       }
     });
     return result.rows[0];
@@ -125,7 +122,7 @@ export async function addEvidence(rawInput: unknown): Promise<Record<string, unk
     }
     const id = randomUUID();
     const result = await client.query(
-      "INSERT INTO evidence (id, source_id, summary, minimal_quote, original_location, page_or_section, confidence, verification_status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
+      "INSERT INTO evidence (id, source_id, summary, minimal_quote, original_location, page_or_section, confidence, verification_status, support_extent) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *",
       [
         id,
         input.sourceId,
@@ -134,7 +131,8 @@ export async function addEvidence(rawInput: unknown): Promise<Record<string, unk
         input.originalLocation ?? null,
         input.pageOrSection ?? null,
         input.confidence,
-        input.verificationStatus
+        input.verificationStatus,
+        input.supportExtent
       ]
     );
     await invalidateDownstreamReview(

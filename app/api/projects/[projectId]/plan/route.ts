@@ -3,7 +3,7 @@ import { handleRoute, enforceRateLimit } from "@/lib/http";
 import { approvePlan } from "@/lib/services/projects";
 import {
   addResearchPlan,
-  generateDeterministicPlan
+  generateProviderPlan
 } from "@/lib/services/workflow";
 
 type Context = { params: Promise<{ projectId: string }> };
@@ -15,12 +15,12 @@ const actionSchema = z.discriminatedUnion("action", [
 ]);
 
 export async function POST(request: Request, context: Context) {
-  enforceRateLimit(request, "research-plan", 10);
   const { projectId } = await context.params;
   return handleRoute(async () => {
+    enforceRateLimit(request, "research-plan", 10);
     const input = actionSchema.parse(await request.json());
     if (input.action === "generate") {
-      return generateDeterministicPlan(projectId);
+      return generateProviderPlan(projectId);
     }
     if (input.action === "approve") {
       return approvePlan(projectId, input.planId);
