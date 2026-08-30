@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AI_STAGES,
+  aiStageOutputSchemas,
+  aiStageInputSchemas,
   BraveSearchProvider,
   MockAIProvider,
   MockSearchProvider,
@@ -10,6 +12,7 @@ import {
   type AIStageRequest,
   type AnyAIStageRequest
 } from "@/lib/providers";
+import { parseStageOutput } from "@/lib/providers/ai-shared";
 
 const now = () => new Date("2026-08-30T00:00:00.000Z");
 
@@ -124,6 +127,105 @@ const stageRequests = {
 } satisfies { [Stage in AIStage]: AIStageRequest<Stage> };
 
 describe("deterministic mock providers", () => {
+  it("rejects malformed or empty stage input before provider execution", () => {
+    expect(
+      aiStageInputSchemas.research_plan.safeParse({ questions: [], constraints: [] }).success
+    ).toBe(false);
+    expect(
+      aiStageInputSchemas.source_summary.safeParse({ sourceId: "source-1" }).success
+    ).toBe(false);
+  });
+
+  it("rejects duplicate source IDs in structured AI output", () => {
+    const parsed = aiStageOutputSchemas.draft_generation.safeParse({
+      title: "Duplicate citation fixture",
+      markdown: "Fixture [@source-1].",
+      citationSourceIds: ["source-1", "source-1"],
+      limitations: []
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it("matches generated question and plan bounds to persistence", () => {
+    const question = {
+      id: "question-1",
+      question: "Valid question?",
+      priority: "HIGH" as const,
+      completionCriteria: ["Done"]
+    };
+    expect(
+      aiStageOutputSchemas.question_decomposition.safeParse({ questions: [question] }).success
+    ).toBe(true);
+    expect(
+      aiStageOutputSchemas.question_decomposition.safeParse({
+        questions: [{ ...question, question: "Four" }]
+      }).success
+    ).toBe(false);
+    expect(
+      aiStageOutputSchemas.question_decomposition.safeParse({
+        questions: [{ ...question, completionCriteria: ["No"] }]
+      }).success
+    ).toBe(false);
+    expect(
+      aiStageOutputSchemas.question_decomposition.safeParse({
+        questions: [{ ...question, completionCriteria: [] }]
+      }).success
+    ).toBe(false);
+    expect(
+      aiStageOutputSchemas.question_decomposition.safeParse({
+        questions: [{ ...question, question: "x".repeat(4_001) }]
+      }).success
+    ).toBe(false);
+
+    const plan = {
+      id: "plan-1",
+      questionId: "question-1",
+      searchStrategy: "Review fixtures.",
+      queries: [],
+      primarySourceTypes: [],
+      secondarySourceTypes: [],
+      comparisonTargets: [],
+      expectedOutput: "A cited answer.",
+      completionCondition: "One fixture is reviewed.",
+      risks: [],
+      researchGap: null
+    };
+    expect(aiStageOutputSchemas.research_plan.safeParse({ steps: [plan] }).success).toBe(true);
+    for (const field of [
+      "searchStrategy",
+      "expectedOutput",
+      "completionCondition"
+    ] as const) {
+      expect(
+        aiStageOutputSchemas.research_plan.safeParse({
+          steps: [{ ...plan, [field]: "No" }]
+        }).success
+      ).toBe(false);
+    }
+    expect(
+      aiStageOutputSchemas.research_plan.safeParse({
+        steps: [{ ...plan, queries: Array.from({ length: 31 }, () => "fixture") }]
+      }).success
+    ).toBe(false);
+    expect(
+      aiStageOutputSchemas.research_plan.safeParse({
+        steps: [{ ...plan, searchStrategy: "x".repeat(10_001) }]
+      }).success
+    ).toBe(false);
+  });
+
+  it("rejects draft citation metadata that differs from inline citations", () => {
+    expect(() =>
+      parseStageOutput("draft_generation", {
+        title: "Citation mismatch fixture",
+        markdown: "Fixture [source-1].",
+        citationSourceIds: [],
+        limitations: []
+      })
+    ).toThrow("Draft citations must exactly match citationSourceIds");
+  });
+
   it("runs every required AI pipeline stage without an API key", async () => {
     const provider = new MockAIProvider(now);
     expect(provider.isConfigured()).toBe(true);
@@ -339,8 +441,8 @@ describe("OpenAI Responses provider", () => {
           status: "completed",
           output_text: JSON.stringify({
             title: "Sample report",
-            markdown: "Unsupported citation [source:invented-source].",
-            citationSourceIds: ["source-1"],
+            markdown: "Unsupported citation [invented-source].",
+            citationSourceIds: ["invented-source"],
             limitations: []
           })
         }),

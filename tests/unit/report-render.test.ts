@@ -84,6 +84,7 @@ describe("report rendering", () => {
         importance: "HIGH",
         support_status: "UNSUPPORTED",
         fact_or_inference: "FACT",
+        within_scope: true,
         include_in_report: false,
         linked_evidence: []
       }
