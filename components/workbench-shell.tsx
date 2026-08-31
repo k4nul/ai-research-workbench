@@ -1,11 +1,17 @@
 "use client";
 
 import {
+  Activity,
   BookOpenCheck,
+  Files,
+  FlaskConical,
   FolderKanban,
   LayoutDashboard,
+  ListTodo,
   Menu,
   Settings,
+  UserRoundCog,
+  Workflow,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -53,6 +59,12 @@ export interface WorkbenchShellProps {
 const defaultNavItems: readonly WorkbenchNavItem[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard, exact: true },
   { href: "/projects", label: "Projects", icon: FolderKanban },
+  { href: "/operations", label: "Operations", icon: Activity },
+  { href: "/jobs", label: "Jobs", icon: ListTodo },
+  { href: "/runs", label: "Runs", icon: Workflow },
+  { href: "/documents", label: "Documents", icon: Files },
+  { href: "/evaluations", label: "Evaluations", icon: FlaskConical },
+  { href: "/sessions", label: "Sessions", icon: UserRoundCog },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
@@ -126,10 +138,13 @@ export function WorkbenchShell({
 }: WorkbenchShellProps) {
   const pathname = usePathname();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
+    shellRef.current?.setAttribute("data-app-ready", "true");
+
     function closeDrawerForHistoryNavigation() {
       setDrawerOpen(false);
     }
@@ -190,7 +205,7 @@ export function WorkbenchShell({
   }
 
   return (
-    <div className="workbench-shell">
+    <div ref={shellRef} className="workbench-shell" data-app-ready="false">
       <a className="skip-link" href="#main-content">
         Skip to main content
       </a>

@@ -1,10 +1,16 @@
 "use client";
 
 import {
+  Activity,
+  Files,
+  FlaskConical,
   FolderKanban,
   LayoutDashboard,
+  ListTodo,
   ScrollText,
   Settings,
+  UserRoundCog,
+  Workflow,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -19,7 +25,13 @@ import type { ProjectRecord } from "./model";
 const globalNavigation: readonly WorkbenchNavItem[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard, exact: true },
   { href: "/projects", label: "Projects", icon: FolderKanban },
+  { href: "/operations", label: "Operations", icon: Activity },
+  { href: "/jobs", label: "Jobs", icon: ListTodo },
+  { href: "/runs", label: "Runs", icon: Workflow },
+  { href: "/documents", label: "Documents", icon: Files },
+  { href: "/evaluations", label: "Evaluations", icon: FlaskConical },
   { href: "/audit", label: "Audit", icon: ScrollText },
+  { href: "/sessions", label: "Sessions", icon: UserRoundCog },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
