@@ -10,6 +10,7 @@ import type {
 } from "./types";
 
 export * from "./brave";
+export * from "./execution";
 export * from "./mock-ai";
 export * from "./mock-search";
 export * from "./openai";

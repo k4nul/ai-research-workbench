@@ -389,6 +389,25 @@ export interface AIUsage {
   totalTokens?: number;
 }
 
+export type ProviderErrorClass =
+  | "RETRYABLE_PROVIDER_RATE_LIMIT"
+  | "RETRYABLE_PROVIDER_SERVER_ERROR"
+  | "RETRYABLE_NETWORK"
+  | "NON_RETRYABLE_VALIDATION"
+  | "NON_RETRYABLE_SECURITY"
+  | "NON_RETRYABLE_BUDGET"
+  | "NON_RETRYABLE_USER_INPUT"
+  | "CANCELLED"
+  | "UNKNOWN";
+
+export interface ProviderExecutionOptions {
+  signal?: AbortSignal;
+  clientRequestId?: string;
+  jobId?: string;
+  runId?: string;
+  attempt?: number;
+}
+
 export interface AIExecutionMetadata {
   provider: string;
   model: string;
@@ -399,6 +418,7 @@ export interface AIExecutionMetadata {
   startedAt: string;
   durationMs: number;
   requestId?: string;
+  providerResponseId?: string;
   usage?: AIUsage;
 }
 
@@ -416,8 +436,19 @@ export type AIExecutionResult<Stage extends AIStage> =
           | "PROVIDER_ERROR"
           | "INVALID_RESPONSE"
           | "UNKNOWN_SOURCE_ID"
-          | "TIMEOUT";
+          | "TIMEOUT"
+          | "CANCELLED"
+          | "RATE_LIMITED"
+          | "SERVER_ERROR"
+          | "REFUSED"
+          | "CONTENT_FILTERED"
+          | "TRUNCATED"
+          | "RESPONSE_TOO_LARGE";
         message: string;
+        classification?: ProviderErrorClass;
+        retryable?: boolean;
+        httpStatus?: number;
+        retryAfterMs?: number;
       };
       metadata: AIExecutionMetadata;
     };
@@ -427,7 +458,8 @@ export interface AIProvider {
   readonly model: string;
   isConfigured(): boolean;
   run<Stage extends AIStage>(
-    request: AIStageRequest<Stage>
+    request: AIStageRequest<Stage>,
+    options?: ProviderExecutionOptions
   ): Promise<AIExecutionResult<Stage>>;
 }
 
@@ -458,13 +490,18 @@ export interface SearchResponse {
     startedAt: string;
     durationMs: number;
     requestId?: string;
+    rateLimit?: {
+      limit?: string;
+      remaining?: string;
+      reset?: string;
+    };
   };
 }
 
 export interface SearchProvider {
   readonly id: string;
   isConfigured(): boolean;
-  search(query: SearchQuery): Promise<SearchResponse>;
+  search(query: SearchQuery, options?: ProviderExecutionOptions): Promise<SearchResponse>;
 }
 
 export interface ProviderStatus {

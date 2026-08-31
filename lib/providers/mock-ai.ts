@@ -2,6 +2,7 @@ import { assessPromptInjection } from "@/lib/security";
 import {
   inputHash,
   parseStageOutput,
+  stableJson,
   unknownSourceIds,
   validateAllowedSourceIds
 } from "./ai-shared";
@@ -22,6 +23,27 @@ function deterministicId(prefix: string, value: string): string {
     .replace(/^-|-$/g, "")
     .slice(0, 32);
   return `${prefix}-${normalized || "item"}`;
+}
+
+function untrustedSourceData(value: string): string {
+  const match = value.match(
+    /<source_data\s+source_id="[^"]+">\s*([\s\S]*?)\s*<\/source_data>/
+  );
+  return (match?.[1] ?? value).replace(/\s+/g, " ").trim();
+}
+
+function isUsableEvidence(value: string): boolean {
+  return !/\b(?:no usable evidence|not relevant to (?:the )?research question)\b/i.test(
+    value
+  );
+}
+
+function evidenceFingerprint(value: string): string {
+  return untrustedSourceData(value).toLowerCase();
+}
+
+function estimatedTokens(value: unknown): number {
+  return Math.max(1, Math.ceil(stableJson(value).length / 4));
 }
 
 function buildOutput(request: AnyAIStageRequest): AIStageOutputMap[AIStage] {
@@ -68,25 +90,39 @@ function buildOutput(request: AnyAIStageRequest): AIStageOutputMap[AIStage] {
           researchGap: null
         }))
       };
-    case "source_summary":
+    case "source_summary": {
+      const sourceData = untrustedSourceData(request.input.content);
       return {
         sourceId: request.input.sourceId,
-        summary: request.input.content.replace(/\s+/g, " ").trim().slice(0, 320) || "Empty source.",
+        summary: sourceData.slice(0, 320) || "Empty source.",
         keyPoints: ["Review the source content and provenance before use."],
         limitations: ["This is deterministic demo summarization."],
-        promptInjectionSuspected: assessPromptInjection(request.input.content).flagged
+        promptInjectionSuspected: assessPromptInjection(sourceData).flagged
       };
-    case "evidence_extraction":
+    }
+    case "evidence_extraction": {
+      const seen = new Set<string>();
       return {
-        evidence: request.input.sources.map((source) => ({
-          sourceId: source.sourceId,
-          summary: source.content.replace(/\s+/g, " ").trim().slice(0, 180) || "No evidence text.",
-          minimalQuote: source.content.replace(/\s+/g, " ").trim().slice(0, 120),
-          location: "fixture:content",
-          stance: "CONTEXT",
-          confidence: "MEDIUM"
-        }))
+        evidence: request.input.sources.flatMap((source) => {
+          const sourceData = untrustedSourceData(source.content);
+          const fingerprint = evidenceFingerprint(source.content);
+          if (!isUsableEvidence(sourceData) || seen.has(fingerprint)) {
+            return [];
+          }
+          seen.add(fingerprint);
+          return [
+            {
+              sourceId: source.sourceId,
+              summary: sourceData.slice(0, 180) || "No evidence text.",
+              minimalQuote: sourceData.slice(0, 120),
+              location: "fixture:content",
+              stance: "CONTEXT" as const,
+              confidence: "MEDIUM" as const
+            }
+          ];
+        })
       };
+    }
     case "claim_generation":
       return {
         claims:
@@ -249,7 +285,20 @@ export class MockAIProvider implements AIProvider {
           metadata
         };
       }
-      return { success: true, output, metadata };
+      const inputTokens = estimatedTokens(request.input);
+      const outputTokens = estimatedTokens(output);
+      return {
+        success: true,
+        output,
+        metadata: {
+          ...metadata,
+          usage: {
+            inputTokens,
+            outputTokens,
+            totalTokens: inputTokens + outputTokens
+          }
+        }
+      };
     } catch (error) {
       return {
         success: false,

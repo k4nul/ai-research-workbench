@@ -1,6 +1,15 @@
 import { createHash } from "node:crypto";
 import { externalHtmlToText, validateExternalUrl } from "@/lib/security";
+import {
+  braveResetMs,
+  classifyFetchFailure,
+  composeAbortSignal,
+  ProviderRequestError,
+  readJsonWithLimit,
+  retryAfterMs
+} from "./execution";
 import type {
+  ProviderExecutionOptions,
   SearchHit,
   SearchProvider,
   SearchQuery,
@@ -15,6 +24,8 @@ export interface BraveSearchProviderOptions {
   fetch?: typeof fetch;
   now?: () => Date;
   userAgent?: string;
+  endpoint?: string;
+  maxResponseBytes?: number;
 }
 
 function validateSearchQuery(input: SearchQuery): Required<
@@ -125,15 +136,36 @@ export class BraveSearchProvider implements SearchProvider {
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => Date;
   private readonly userAgent: string;
+  private readonly endpoint: string;
+  private readonly maxResponseBytes: number;
 
   constructor(options: BraveSearchProviderOptions = {}) {
     this.apiKey = options.apiKey?.trim() || undefined;
     this.timeoutMs = options.timeoutMs ?? 10_000;
     this.fetchImpl = options.fetch ?? fetch;
     this.now = options.now ?? (() => new Date());
-    this.userAgent = options.userAgent ?? "ai-research-workbench/0.1";
+    this.userAgent = options.userAgent ?? "ai-research-workbench/0.2";
+    this.endpoint = options.endpoint ?? BRAVE_SEARCH_ENDPOINT;
+    this.maxResponseBytes = options.maxResponseBytes ?? 2_000_000;
     if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1_000 || this.timeoutMs > 30_000) {
       throw new Error("Brave timeout must be an integer between 1000 and 30000 ms");
+    }
+    if (
+      !Number.isInteger(this.maxResponseBytes) ||
+      this.maxResponseBytes < 1_024 ||
+      this.maxResponseBytes > 10_000_000
+    ) {
+      throw new Error("Brave maxResponseBytes must be an integer between 1024 and 10000000");
+    }
+    const endpoint = new URL(this.endpoint);
+    if (
+      endpoint.protocol !== "https:" &&
+      endpoint.hostname !== "127.0.0.1" &&
+      endpoint.hostname !== "localhost"
+    ) {
+      throw new Error(
+        "Brave endpoint must use HTTPS except for a loopback contract-test server"
+      );
     }
   }
 
@@ -141,13 +173,19 @@ export class BraveSearchProvider implements SearchProvider {
     return Boolean(this.apiKey);
   }
 
-  async search(input: SearchQuery): Promise<SearchResponse> {
+  async search(
+    input: SearchQuery,
+    options: ProviderExecutionOptions = {}
+  ): Promise<SearchResponse> {
     if (!this.apiKey) {
-      throw new Error("Brave Search is not configured");
+      throw new ProviderRequestError("Brave Search is not configured", {
+        classification: "NON_RETRYABLE_USER_INPUT",
+        retryable: false
+      });
     }
     const query = validateSearchQuery(input);
     const startedAt = this.now();
-    const url = new URL(BRAVE_SEARCH_ENDPOINT);
+    const url = new URL(this.endpoint);
     url.searchParams.set("q", query.query);
     url.searchParams.set("count", String(query.count));
     url.searchParams.set("safesearch", query.safeSearch);
@@ -168,6 +206,7 @@ export class BraveSearchProvider implements SearchProvider {
     }
 
     let response: Response;
+    const abort = composeAbortSignal(this.timeoutMs, options.signal);
     try {
       response = await this.fetchImpl(url, {
         method: "GET",
@@ -176,18 +215,45 @@ export class BraveSearchProvider implements SearchProvider {
           "X-Subscription-Token": this.apiKey,
           "User-Agent": this.userAgent
         },
-        signal: AbortSignal.timeout(this.timeoutMs)
+        signal: abort.signal
       });
     } catch (error) {
-      if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
-        throw new Error("Brave Search request timed out", { cause: error });
-      }
-      throw new Error("Brave Search request failed", { cause: error });
+      const classified = classifyFetchFailure(
+        error,
+        options.signal,
+        abort.timeoutSignal
+      );
+      throw new ProviderRequestError(
+        classified.classification === "CANCELLED"
+          ? "Brave Search request was cancelled"
+          : abort.timeoutSignal.aborted
+            ? "Brave Search request timed out"
+            : "Brave Search request failed",
+        {
+          classification: classified.classification,
+          retryable: classified.retryable,
+          cause: error
+        }
+      );
     }
     if (!response.ok) {
-      throw new Error(`Brave Search returned HTTP ${response.status}`);
+      const rateLimited = response.status === 429;
+      const serverError = response.status >= 500;
+      throw new ProviderRequestError(`Brave Search returned HTTP ${response.status}`, {
+        classification: rateLimited
+          ? "RETRYABLE_PROVIDER_RATE_LIMIT"
+          : serverError
+            ? "RETRYABLE_PROVIDER_SERVER_ERROR"
+            : "NON_RETRYABLE_USER_INPUT",
+        retryable: rateLimited || serverError,
+        httpStatus: response.status,
+        retryAfterMs: rateLimited
+          ? retryAfterMs(response.headers) ?? braveResetMs(response.headers)
+          : undefined,
+        requestId: response.headers.get("x-request-id") ?? undefined
+      });
     }
-    const payload: unknown = await response.json();
+    const payload = await readJsonWithLimit(response, this.maxResponseBytes);
     return {
       provider: this.id,
       query: query.query,
@@ -197,7 +263,12 @@ export class BraveSearchProvider implements SearchProvider {
         durationMs: Math.max(0, this.now().getTime() - startedAt.getTime()),
         ...(response.headers.get("x-request-id")
           ? { requestId: response.headers.get("x-request-id") ?? undefined }
-          : {})
+          : {}),
+        rateLimit: {
+          limit: response.headers.get("x-ratelimit-limit") ?? undefined,
+          remaining: response.headers.get("x-ratelimit-remaining") ?? undefined,
+          reset: response.headers.get("x-ratelimit-reset") ?? undefined
+        }
       }
     };
   }
