@@ -46,6 +46,7 @@ describe("HTTP and intake boundaries", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
+          "idempotency-key": "rate-limit-route-fixture",
           "x-forwarded-for": client
         },
         body: "{"
@@ -72,6 +73,51 @@ describe("HTTP and intake boundaries", () => {
         details: { retryAfterSeconds: expect.any(Number) }
       }
     });
+  });
+
+  it("rejects an oversized streamed mutation without waiting on the cloned body", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(4 * 1_024 * 1_024 + 1));
+        controller.close();
+      }
+    });
+    const request = new Request(
+      "http://localhost/api/projects/project-fixture/sources/search",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "oversized-stream-fixture",
+          "x-forwarded-for": `oversized-stream-${crypto.randomUUID()}`
+        },
+        body,
+        duplex: "half"
+      } as RequestInit & { duplex: "half" }
+    );
+    expect(request.headers.has("content-length")).toBe(false);
+
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const response = await Promise.race([
+        searchSources(request, {
+          params: Promise.resolve({ projectId: "project-fixture" })
+        }),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("Oversized streamed mutation did not return promptly.")),
+            1_000
+          );
+        })
+      ]);
+
+      expect(response.status).toBe(413);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "MUTATION_BODY_TOO_LARGE" }
+      });
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   });
 
   it("rejects duplicate deliverable formats", () => {
