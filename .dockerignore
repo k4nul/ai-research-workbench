@@ -8,6 +8,7 @@ node_modules
 coverage
 playwright-report
 test-results
+.artifacts
 exports
 uploads
 screenshots/.tmp

@@ -1,3 +1,37 @@
+x-app-environment: &app-environment
+  DATABASE_URL: postgresql://research:research@db:5432/research_workbench
+  DATABASE_POOL_SIZE: "10"
+  DEMO_MODE: "true"
+  APP_URL: http://localhost:3100
+  STORAGE_PROVIDER: s3
+  S3_ENDPOINT: http://object-storage:9000
+  S3_REGION: us-east-1
+  S3_BUCKET: research-workbench
+  S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-research-minio}
+  S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-local-minio-password-change-me}
+  S3_FORCE_PATH_STYLE: "true"
+  MALWARE_SCANNER_PROVIDER: clamav
+  CLAMAV_HOST: scanner
+  CLAMAV_PORT: "3310"
+  MALWARE_REQUIRED: "true"
+  MALWARE_ALLOW_DEMO_BYPASS: "false"
+  AUTH_ENABLED: "true"
+  AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:-local-session-secret-change-before-sharing}
+  AUTH_SESSION_TTL_SECONDS: "43200"
+  AUTH_COOKIE_SECURE: "true"
+  AUTH_DEMO_BYPASS: "false"
+  SERVICE_VERSION: "0.2.0"
+
+x-app-dependencies: &app-dependencies
+  db:
+    condition: service_healthy
+  object-storage-init:
+    condition: service_completed_successfully
+  scanner:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
+
 services:
   db:
     image: postgres:17-alpine
@@ -6,31 +40,128 @@ services:
       POSTGRES_USER: research
       POSTGRES_PASSWORD: research
     ports:
-      - "55432:5432"
+      - "127.0.0.1:55432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U research -d research_workbench"]
       interval: 2s
       timeout: 3s
-      retries: 20
+      retries: 30
+      start_period: 5s
     volumes:
       - research-workbench-db:/var/lib/postgresql/data
+    restart: unless-stopped
+    mem_limit: 768m
 
-  app:
-    build: .
-    profiles: ["app"]
+  object-storage:
+    image: quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address ":9001"
     environment:
-      DATABASE_URL: postgresql://research:research@db:5432/research_workbench
-      DEMO_MODE: "true"
-      APP_URL: http://localhost:3100
-      STORAGE_DIR: /app/.data
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-research-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-local-minio-password-change-me}
     ports:
-      - "3100:3100"
+      - "127.0.0.1:59000:9000"
+      - "127.0.0.1:59001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    volumes:
+      - research-workbench-objects:/data
+    restart: unless-stopped
+    mem_limit: 768m
+
+  object-storage-init:
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      object-storage:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-research-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-local-minio-password-change-me}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set local http://object-storage:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing local/research-workbench &&
+        mc anonymous set none local/research-workbench
+    restart: "no"
+
+  scanner:
+    image: clamav/clamav:1.4.6
+    ports:
+      - "127.0.0.1:53310:3310"
+    volumes:
+      - research-workbench-clamav:/var/lib/clamav
+    restart: unless-stopped
+    mem_limit: 2g
+
+  migrate:
+    image: ai-research-workbench:v0.2.0-local
+    build: .
+    command: ["./node_modules/.bin/tsx", "scripts/migrate.ts"]
+    environment: *app-environment
     depends_on:
       db:
         condition: service_healthy
+    restart: "no"
+
+  web:
+    image: ai-research-workbench:v0.2.0-local
+    build: .
+    environment: *app-environment
+    ports:
+      - "127.0.0.1:3100:3100"
+    depends_on: *app-dependencies
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3100/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 5s
+      timeout: 4s
+      retries: 30
+      start_period: 10s
     volumes:
       - research-workbench-data:/app/.data
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 1g
+
+  worker:
+    image: ai-research-workbench:v0.2.0-local
+    build: .
+    command: ["./node_modules/.bin/tsx", "worker/main.ts"]
+    environment:
+      <<: *app-environment
+      WORKER_ID: compose-worker-1
+      WORKER_CONCURRENCY: "2"
+      PROVIDER_CONCURRENCY: "2"
+      DOCUMENT_EXTRACTION_CONCURRENCY: "1"
+    depends_on: *app-dependencies
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "./node_modules/.bin/tsx",
+          "scripts/worker-readiness.ts"
+        ]
+      interval: 10s
+      timeout: 8s
+      retries: 18
+      start_period: 15s
+    volumes:
+      - research-workbench-data:/app/.data
+    restart: unless-stopped
+    stop_grace_period: 40s
+    mem_limit: 1g
 
 volumes:
   research-workbench-db:
+  research-workbench-objects:
+  research-workbench-clamav:
   research-workbench-data:
