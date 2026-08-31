@@ -1,0 +1,148 @@
+{
+  "schemaVersion": "2.0",
+  "id": "index.management.v2",
+  "kind": "management-index",
+  "applicationVersion": "0.2.0",
+  "files": [
+    {
+      "id": "index.file.agent-instructions",
+      "path": "docs/management/agent-instructions.json",
+      "kind": "agent-instructions",
+      "schemaVersion": "2.0"
+    },
+    {
+      "id": "index.file.architecture",
+      "path": "docs/management/ARCHITECTURE.json",
+      "kind": "architecture",
+      "schemaVersion": "2.0"
+    },
+    {
+      "id": "index.file.automation",
+      "path": "docs/management/AUTOMATION.json",
+      "kind": "automation",
+      "schemaVersion": "2.0"
+    }
+  ],
+  "documents": [
+    {
+      "id": "index.document.changelog",
+      "path": "CHANGELOG.md",
+      "purpose": "Release-visible v0.2 changes, compatibility, and migration notes."
+    },
+    {
+      "id": "index.document.readme",
+      "path": "README.md",
+      "purpose": "Primary product, setup, operations, verification, and boundary overview."
+    },
+    {
+      "id": "index.document.ai-pipeline",
+      "path": "docs/AI_PIPELINE.md",
+      "purpose": "Versioned eleven-stage authority, execution, provenance, and replay contract."
+    },
+    {
+      "id": "index.document.architecture",
+      "path": "docs/ARCHITECTURE.md",
+      "purpose": "Web, worker, database, object, provider, and code-boundary architecture."
+    },
+    {
+      "id": "index.document.authentication",
+      "path": "docs/AUTHENTICATION.md",
+      "purpose": "Named operator sessions, CSRF, bypass constraints, and non-tenancy boundary."
+    },
+    {
+      "id": "index.document.data-model",
+      "path": "docs/DATA_MODEL.md",
+      "purpose": "Research, execution, identity, provider, document, object, and audit entities."
+    },
+    {
+      "id": "index.document.demo",
+      "path": "docs/DEMO.md",
+      "purpose": "Synthetic fixture setup and review walkthrough."
+    },
+    {
+      "id": "index.document.deployment",
+      "path": "docs/DEPLOYMENT.md",
+      "purpose": "Host/Compose topology, health, rollout, migration, and production checklist."
+    },
+    {
+      "id": "index.document.document-pipeline",
+      "path": "docs/DOCUMENT_PIPELINE.md",
+      "purpose": "Quarantine, private storage, scanner, extraction limits, chunks, and anchors."
+    },
+    {
+      "id": "index.document.evaluation",
+      "path": "docs/EVALUATION.md",
+      "purpose": "Release evaluation corpus, labels, scoring, persistence, and live boundary."
+    },
+    {
+      "id": "index.document.export-formats",
+      "path": "docs/EXPORT_FORMATS.md",
+      "purpose": "Artifact formats, approval/currentness, persistence, and inspection."
+    },
+    {
+      "id": "index.document.limitations",
+      "path": "docs/LIMITATIONS.md",
+      "purpose": "Explicit non-production, identity, execution, document, model, and UI limits."
+    },
+    {
+      "id": "index.document.migration",
+      "path": "docs/MIGRATING_FROM_V0_1.md",
+      "purpose": "Forward-only v0.1 upgrade, compatibility, validation, restore, and forward-fix procedure."
+    },
+    {
+      "id": "index.document.operations",
+      "path": "docs/OPERATIONS.md",
+      "purpose": "Queue, worker, orchestration, idempotency, recovery, cancellation, metrics, and runbooks."
+    },
+    {
+      "id": "index.document.product",
+      "path": "docs/PRODUCT.md",
+      "purpose": "Product statement, users, principles, completion, and boundary."
+    },
+    {
+      "id": "index.document.providers-evaluation",
+      "path": "docs/PROVIDERS_EVALUATION.md",
+      "purpose": "Mock/live providers, permits, budgets, canary, and deterministic evaluation."
+    },
+    {
+      "id": "index.document.qa-rules",
+      "path": "docs/QA_RULES.md",
+      "purpose": "Deterministic QA and strict blocker semantics."
+    },
+    {
+      "id": "index.document.research-workflow",
+      "path": "docs/RESEARCH_WORKFLOW.md",
+      "purpose": "Intake through evidence, report, QA, approval, and delivery workflow."
+    },
+    {
+      "id": "index.document.roadmap",
+      "path": "docs/ROADMAP.md",
+      "purpose": "Evidence-gated priorities after the v0.2 baseline."
+    },
+    {
+      "id": "index.document.security",
+      "path": "docs/SECURITY.md",
+      "purpose": "Trust boundaries, implemented controls, and production blockers."
+    },
+    {
+      "id": "index.document.testing",
+      "path": "docs/TESTING.md",
+      "purpose": "Strict test lanes, browser scope, CI evidence, and troubleshooting."
+    }
+  ],
+  "validator": {
+    "id": "index.validator.management",
+    "path": "scripts/validate-management.ts",
+    "command": "npm run docs:validate",
+    "checks": [
+      "exact management filenames and schema version",
+      "global duplicate IDs",
+      "declared filesystem paths",
+      "complete package script inventory",
+      "complete workflow inventory",
+      "complete Markdown document inventory",
+      "declared route path and exported method",
+      "local Markdown targets and headings"
+    ]
+  }
+}

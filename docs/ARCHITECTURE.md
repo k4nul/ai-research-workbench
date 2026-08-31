@@ -2,102 +2,105 @@
 
 ## System shape
 
-AI Research Workbench is a single Next.js 16 application backed by PostgreSQL. Server route handlers call typed service functions; services execute parameterized SQL and transactions; pure domain modules calculate research and QA state; export modules render delivery artifacts in process.
-
 ```text
-Browser or API client
-        |
-        v
-Next.js route handlers (app/api)
-        |
-        v
-Services and validation (lib/services, lib/validation)
-        |                    |                    |
-        v                    v                    v
-PostgreSQL (pg)       Pure domain rules     Export renderers
-        |             (lib/domain)          (lib/export)
-        |
-        +---- audit events / AI run metadata / jobs / export records
-
-Optional provider adapters: mock (default), OpenAI Responses, Brave Search
-Security utilities: URL fetch, file validation, HTML sanitization
+Authenticated browser/API client
+              |
+              v
+Next.js routes and pages (app, proxy.ts)
+              |
+              v
+Auth/data-access + services (lib/auth, lib/services)
+       |                    |
+       v                    v
+PostgreSQL queue/graph   Private object storage
+       |                    |
+       +------ worker ------+
+                 |
+        mock or live providers
 ```
 
-The diagram shows code boundaries, not an automatic pipeline. Source routes call search, safe fetch, upload validation/storage, and import services. A pipeline route invokes and persists one typed AI stage. The normal plan action applies the question-decomposition and research-plan stages, using the deterministic mock by default; the rest of the workflow does not automatically sequence all provider stages.
+The web and worker are separate processes built from the same image. PostgreSQL is authoritative for operators/sessions, the research graph, run/stage state, jobs/attempts/events, provider executions/permits, evaluations, object metadata, exports, progress, and audit history. Raw document/export bytes live in contained local storage or one configured private S3-compatible bucket.
 
-## Runtime components
+## Code boundaries
 
-| Component | Responsibility | Boundary |
-| --- | --- | --- |
-| `app/api` | HTTP parsing, validation, status/error mapping, rate-limit calls | No browser identity or session enforcement |
-| `lib/services` | Transactions, state transitions, ingestion, provider-run persistence, audit records, progress refresh | PostgreSQL-specific; not a public SDK |
-| `lib/domain` | Pure progress, freshness, support, citation, gap, and QA rules | No I/O and independently unit-testable |
-| `lib/providers` | Typed AI/search contracts, mock implementations, optional live adapters | Selected by config and callable stage by stage; not automatically sequenced |
-| `lib/security` | Untrusted-content sanitization, file validation, SSRF-resistant fetching | Used by local ingestion routes; not a substitute for auth/malware scanning |
-| `lib/export` | Load project graph and render Markdown/HTML/PDF/DOCX/CSV/ZIP | In-process memory; persisted files use private storage paths |
-| `lib/db.ts` | `pg` pool, query helper, transaction helper | One configured PostgreSQL database |
-| `migrations` | Raw, ordered SQL schema changes | Applied by `scripts/migrate.ts` and recorded in `schema_migrations` |
-| `components` and `app/**/page.tsx` | Workbench shell, reusable features, and browser workflow pages | Desktop/mobile Chromium specs are a regression baseline, not cross-browser certification |
+| Path | Responsibility |
+| --- | --- |
+| `app/api` | HTTP/path/query/body parsing, authentication entry, status mapping |
+| `app/**/page.tsx`, `components` | Server-rendered pages and client interactions |
+| `proxy.ts` | Early public-path and session-cookie presence checks; not durable auth |
+| `lib/auth` | Runtime constraints, password/session/CSRF primitives, principal DAL |
+| `lib/services` | PostgreSQL transactions, project scoping, workflow/run/job/document/provider/export mutations, audit |
+| `lib/domain` | Pure job, run, research, progress, and QA rules |
+| `lib/execution` | Versioned eleven-stage catalog and dependencies |
+| `lib/providers` | Typed mock/OpenAI/Brave adapters and structured-output boundary |
+| `lib/budgets` | Frozen resource/cost limits and known/estimated/unknown pricing |
+| `lib/documents` | Scanner, extraction, chunk, anchor, and document-state rules |
+| `lib/storage` | Local/S3 object interface, containment, integrity, signed URLs |
+| `lib/security` | SSRF-safe fetch, file validation, HTML sanitization, prompt-injection signals |
+| `lib/export` | Snapshot loading and Markdown/HTML/PDF/DOCX/CSV/ZIP renderers |
+| `worker` | Durable poll/lease loop and registered document/research handlers |
+| `migrations` | Ordered additive raw SQL migrations |
+| `scripts` | Setup, operator, worker probe, eval/canary, release, cleanup, validation |
 
-## Request and state flow
+Route handlers should not own database orchestration. Services should not render UI. Pure rules should not perform I/O. Provider/document/model text is untrusted at every layer.
 
-1. A route validates JSON request bodies and selected path/query values with Zod schemas; simple identifiers and flags are parsed directly where noted by the route.
-2. A service locks or queries the relevant records.
-3. The service enforces the state transition and writes related records inside a transaction where consistency requires it.
-4. State-changing operations append an `audit_events` record.
-5. Research mutations refresh progress from persisted evidence rather than trusting the incoming status.
-6. The route returns a no-store JSON response or streams an export with an attachment filename.
+## Request and identity flow
 
-Expected validation/domain errors return stable application codes and bounded messages. Unexpected server failures return a generic `INTERNAL_ERROR` plus a random reference instead of exposing raw database or provider details.
+Public paths are login, auth login/session, and health. The proxy redirects requests without a session cookie, but APIs/pages then verify the HMAC-hashed opaque session against PostgreSQL. Unsafe API requests require an allowed `Origin`, double-submit CSRF proof, and a stable idempotency key. Authenticated JSON mutations atomically store a principal/method/path/request-hash response receipt with their database and audit effects; multipart uploads use the document service's byte-hash/object/job idempotency. Mutations derive a trusted audit actor from the request principal; actor type is not accepted from HTTP input.
 
-## Workflow architecture
+The explicit demo bypass is restricted to non-production demo mode, loopback configured URL/bind, and loopback request host. It is not tenancy or a public deployment mode.
 
-Progress is derived from eight equal gates:
+## Research graph and review flow
 
 ```text
-scope -> plan -> questions -> claim/evidence -> report -> QA -> approval -> exports
+project
+  -> approved scope/plan revisions
+  -> research questions
+  -> sources -> evidence
+  -> claims <-> evidence links
+  -> findings
+  -> deliverable revisions
+  -> QA findings -> approval -> current ZIP
 ```
 
-Material scope, research, evidence, claim, finding, or report edits invalidate downstream QA/approval state and mark persisted exports non-current. QA reads the current project graph and latest deliverable, replaces prior open engine-generated findings, records its decision, and moves the project to `QA` or `APPROVAL_REQUIRED`. Approval is an explicit request followed by a confirmed approve action. Delivery requires approval and a newly generated current ZIP.
+Material research changes invalidate downstream review/approval and mark earlier exports non-current. QA blocker semantics are strict: only `RESOLVED` clears a blocker. `ACCEPTED_RISK` does not clear blocker severity. Final delivery needs a current approved graph and newly current ZIP.
 
-## Data architecture
+## Durable execution
 
-PostgreSQL holds normalized workflow entities and JSONB only where shape flexibility is useful (quality defaults, contact metadata, report sections, provider usage, audit snapshots, job payloads, and fetch/export metadata). Foreign keys and checks enforce relationships and enumerated states. See [Data model](DATA_MODEL.md).
+Creating a run freezes revisions, pipeline/provider/model configuration, budget, and request hash, then creates versioned stage generations. The worker claims jobs with `FOR UPDATE SKIP LOCKED`, owns time-bounded leases, heartbeats, observes cancellation, applies retry policy, and recovers expiry.
 
-`jobs` is currently only a durable table contract with status, attempts, schedule, and error fields. There is no job worker, lease protocol, scheduler, or retry loop. Provider and export calls therefore run synchronously when invoked.
+Delivery is at least once, not exactly once. Job idempotency/input hashes, stage generations, attempt/worker fences, output hashes, and transactional domain-commit records reject known replay and stale-worker races. Provider execution and external side effects remain replayable and require reconciliation.
 
-## Provider architecture
+See [Operations](OPERATIONS.md) and [AI pipeline](AI_PIPELINE.md).
 
-AI work is represented as eleven typed stages. Each stage has a strict Zod output schema and metadata for provider, model, prompt-template version, input hash, timing, request ID, and usage. The mock provider produces deterministic fixtures. The OpenAI adapter sends a Responses API request with strict JSON Schema output and `store: false`; the Brave adapter performs bounded web search and normalizes results. Provider outputs containing source IDs are checked against the request allowlist.
+## Document and object flow
 
-Selection is conservative: demo mode or a missing key yields the corresponding mock provider. `POST /api/projects/:projectId/pipeline` validates source ownership, persists an `ai_runs` lifecycle, calls the selected AI adapter, and audits the result. Source search uses the selected search provider. Live provider behavior has not been verified without keys, and no orchestrator automatically sequences stages into an accepted research record. See [AI pipeline](AI_PIPELINE.md).
+```text
+validated bytes
+  -> private quarantine object + source/document rows
+  -> scan job -> ClamAV result
+  -> extraction job
+  -> extraction generation -> blocks -> chunks -> citation anchors
+```
 
-## Security architecture
+Object size/hash is verified on write/read/scan. Production is fail closed on scanner error. PDF/DOCX/TXT/HTML/Markdown/CSV/JSON parsers have explicit bounds and applicable active-content controls. A new extraction makes prior anchors and linked evidence citations require review. Exports use the same storage abstraction with input-hash reuse and byte verification.
 
-The application assumes database records, uploads, fetched pages, and model output can contain untrusted text. Controls include schema validation, parameterized SQL, HTML sanitization, prompt-injection heuristics, citation/source allowlists, SSRF and DNS-rebinding defenses, size/time/media-type bounds, storage containment, restrictive artifact permissions, security response headers, and audit events.
+See [Document pipeline](DOCUMENT_PIPELINE.md) and [Export formats](EXPORT_FORMATS.md).
 
-These controls do not replace authentication, authorization, CSRF protection, tenant isolation, malware scanning, TLS termination, managed secrets, backups, retention, or a distributed rate limiter. See [Security](SECURITY.md).
+## Provider and budget flow
 
-## Deployment architecture
+Stage requests carry strict schemas, source allowlists, versioned prompts, input hashes, timeouts, and abort signals. Provider attempts are recorded independently of jobs and domain commits. PostgreSQL permits coordinate shared request windows/concurrency. Frozen budgets guard requests, tokens, elapsed time, attempts, sources, document chunks, and cost; unknown live pricing blocks finite-cost runs rather than becoming zero.
 
-Development uses Node.js 22 and PostgreSQL 17 on host port `55432`. The Dockerfile builds Next's standalone output and runs it as a non-root user. Compose defines a persistent database volume and an optional `app` profile with a private data volume. Migrations are a separate operational command; the application does not auto-migrate at startup.
+Mock providers are deterministic. Optional live OpenAI/Brave calls are isolated from normal CI and assessed only by a bounded synthetic canary. See [Providers, evaluation, and budgets](PROVIDERS_EVALUATION.md).
 
-## Conceptual influences and licensing boundary
+## Storage and migrations
 
-The architecture was informed by, but did not copy from:
+PostgreSQL uses parameterized `pg` queries and transactions. JSONB is used for versioned snapshots, provider/job input/output, usage, metadata, and audit before/after state; normalized tables retain core relationships.
 
-- `web/web-template/templates/internal-tool-base`: composable internal-tool boundaries and caution around enabling persistence, auth, and collaboration.
-- `web/google-docs-clone/Front-End`: persistent document-workspace patterns, save/review status, and sanitized document conversion.
-- `automation-projects/ai-chatbot-rag`: bounded provenance, source allowlists, and untrusted retrieved text.
-- `automation-projects/internal-tools-dashboard`: allowlisted operational views, dense status/detail patterns, and explicit action authorization concepts.
-- `automation-projects/mvp-build-service`: intake-to-slice workflow, bounded artifacts, and strict handoff evidence.
+Migrations run in lexical order under a PostgreSQL advisory lock. Every new migration is transactional and checksum-recorded. Applied migrations are immutable and forward-only. Rollback after commit requires a matching database/object snapshot restore or a new forward fix. See [Migrating from v0.1](MIGRATING_FROM_V0_1.md).
 
-Those repository roots have no top-level license granting source reuse. No code or assets were copied; the references were conceptual only. This repository has its own MIT license.
+## Deployment
 
-## Intentional decisions
+The Dockerfile builds Next.js standalone output on Node 22 Alpine, installs Noto and Noto CJK fonts plus `tini`, and runs as UID 1001. The same immutable image launches web, worker, or migration entrypoints. Compose supplies PostgreSQL, MinIO, ClamAV, migration, web, and worker with loopback host ports and persistent volumes.
 
-- **Raw SQL over an ORM:** keeps the schema and transactional workflow explicit for the MVP.
-- **Mock by default:** makes local evaluation reproducible and prevents accidental provider spend or data transfer.
-- **Pure QA engine:** separates deterministic quality policy from persistence and model behavior.
-- **In-process export:** minimizes infrastructure for the local MVP, at the cost of memory and request-duration limits.
-- **Human approval gate:** prevents provider output or a stored status flag from authorizing final delivery.
+Production-mode validation requires secure auth and fail-closed scanning. Production readiness additionally needs authorization/tenancy, TLS, managed secrets/backups, retention, monitoring/alerts, and incident processes. See [Deployment](DEPLOYMENT.md), [Security](SECURITY.md), and [Limitations](LIMITATIONS.md).

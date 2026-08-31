@@ -10,10 +10,11 @@ The demo proves the data model and review workflow without API keys or customer 
 cp .env.example .env
 npm ci
 npm run setup
-npm run dev
+npm run operator:create
+npm run dev:all
 ```
 
-`npm run setup` starts PostgreSQL, applies migrations, and seeds the fixture. Open `http://localhost:3100` to walk through the dashboard, research, review, approval, and export pages. The JSON APIs remain useful for reproducible checks.
+`npm run setup` starts PostgreSQL, applies migrations, and seeds the fixture. Create a named operator, then `dev:all` starts the loopback web process and durable worker. Open `http://localhost:3100`, sign in, and walk through the dashboard, research, run, review, approval, operations, and export pages.
 
 The seeded project ID is `project-demo`.
 
@@ -66,29 +67,17 @@ Open the latest deliverable and locate bracketed source IDs in detailed analysis
 
 ### 5. Run QA
 
-Invoke:
-
-```bash
-curl --fail -X POST http://127.0.0.1:3100/api/projects/project-demo/qa
-curl --fail http://127.0.0.1:3100/api/projects/project-demo/qa
-```
-
-Record the actual findings. The seeded historical findings demonstrate earlier corrections; a fresh QA run evaluates the current graph and may replace only open engine-generated findings. Do not assume the seed's `qa_passed_at` proves the rerun outcome.
+Use the QA page to run QA and record the actual findings. The authenticated mutation supplies same-origin and CSRF proof. The seeded historical findings demonstrate earlier corrections; a fresh QA run evaluates the current graph and may replace only open engine-generated findings. Do not assume the seed's `qa_passed_at` proves the rerun outcome.
 
 ### 6. Review approval
 
-The project is seeded with approval pending. Approval requires explicit confirmation:
+The project is seeded with approval pending. Use the Approval page and its explicit confirmation. This mutates the local fixture and records the authenticated operator derived from the durable session. v0.2 does not have a separate approver role or cryptographic signature.
 
-```bash
-curl --fail \
-  -H 'content-type: application/json' \
-  -d '{"action":"approve","confirmation":true}' \
-  http://127.0.0.1:3100/api/projects/project-demo/approval
-```
+### 7. Exercise durable operations
 
-This mutates the local fixture. There is no authenticated identity; the audit event records `Local user` only.
+Start a disposable mock run from the Runs workflow, then inspect its eleven stage generations, jobs, attempts, provider executions, metrics, and audit events. The deterministic provider requires no key. If you stop the worker, queued work remains durable; restart it with `npm run worker`. Do not treat a completed mock run as factual research evidence.
 
-### 7. Inspect exports
+### 8. Inspect exports
 
 Before approval, generate review formats:
 

@@ -1,123 +1,161 @@
 # Deployment
 
-## Supported local topology
+## Supported local topologies
 
-The supported MVP topology is one trusted local operator, one Next.js process, one local PostgreSQL database, and a private local artifact directory.
+### Host development
 
-Prerequisites:
-
-- Node.js 22+
-- npm
-- Docker with Compose, or PostgreSQL 17 managed separately
+PostgreSQL runs in Compose; web/worker run on the host with local object storage and the mock scanner/provider defaults:
 
 ```bash
 cp .env.example .env
 npm ci
-npm run db:start
-npm run db:migrate
-npm run seed
-npm run dev
+npm run setup
+npm run operator:create
+npm run dev:all
 ```
 
-The app listens on port `3100`. The Compose database maps host port `55432` to PostgreSQL `5432` and persists data in the `research-workbench-db` volume. `npm run doctor` checks Node, Docker availability, database connectivity, Playwright Chromium, storage writability, and provider-key status.
+`npm run dev` binds Next.js to `127.0.0.1:3100`; `npm run worker` runs only the worker. `dev:all` manages both child processes.
 
-## Migrations and seed
-
-Run migrations as an explicit release step:
+### Full Compose
 
 ```bash
-npm run db:migrate
+docker compose up -d --build --wait
+docker compose exec -T web ./node_modules/.bin/tsx scripts/seed.ts
+docker compose ps
+docker compose exec -T worker ./node_modules/.bin/tsx scripts/worker-readiness.ts
 ```
 
-The migration runner creates `schema_migrations`, sorts SQL files by filename, takes PostgreSQL advisory lock `735721` inside each migration transaction, and records completed filenames. The app does not auto-migrate on startup.
+Services are PostgreSQL 17, MinIO, bucket initialization, ClamAV 1.4.6, one-shot migration, web, and worker. Published ports for web, database, MinIO, console, and scanner are loopback-only. Persistent volumes hold PostgreSQL, objects, ClamAV signatures, and application data.
 
-Seed data is optional and synthetic:
+The Compose auth cookie is secure while the published development origin is HTTP. Health/API automation works, but an interactive browser will not send secure cookies over plain HTTP. For browser evaluation use the host development topology, or put Compose behind a trusted HTTPS origin; do not make cookies insecure on a remotely reachable host.
 
-```bash
-npm run seed
-```
-
-The seed is idempotent by record ID but is intended for a local demo database. Do not seed a production database.
-
-To clear all application rows, the reset script requires explicit opt-in and truncates the application tables:
-
-```bash
-ALLOW_DATABASE_RESET=true npm run db:reset
-```
-
-This is destructive and not a rollback mechanism. Verify `DATABASE_URL` first and require a backup if the database is not disposable.
-
-## Container image
+## Image
 
 The multi-stage Dockerfile:
 
-1. installs locked dependencies on Node 22 Alpine;
-2. builds Next's standalone output;
-3. installs Noto fonts in the runner;
-4. copies only the standalone server, static files, and public assets;
-5. creates `/app/.data`;
-6. runs as the non-root `nextjs` user on port `3100`.
+1. installs locked build dependencies and a separate production-only dependency tree on Node 22 Alpine;
+2. builds Next.js standalone output;
+3. installs Noto and Noto CJK fonts plus `tini`;
+4. copies the standalone web server plus shared `lib`, `worker`, `scripts`, and `migrations`;
+5. creates private application data;
+6. runs as non-root UID/GID 1001;
+7. exposes the web entrypoint by default; Compose overrides the command for migration/worker.
 
-The optional Compose app profile can run the built image with the Compose database:
+The runtime image installs with `npm ci --omit=dev` and then removes Next.js's development-only optional Playwright peer packages. It excludes Playwright, Vitest, ESLint, TypeScript, and other development-only packages, while runtime CLI commands retain `tsx` and `dotenv` as direct production dependencies. The dependency audit uses `--omit=dev` so every direct and transitive production dependency remains covered.
+
+Web and worker must use a compatible image, schema, pipeline/prompts, and job contracts. Rolling mismatched versions is not supported.
+
+## Configuration gates
+
+[`.env.example`](../.env.example) is canonical. Startup validation includes:
+
+- Node.js 22.13+ at package level;
+- lease duration greater than twice heartbeat;
+- S3 endpoint/access key/secret when S3 is selected;
+- loopback URL for auth bypass;
+- in production: auth enabled, bypass disabled, secure cookies, 32+ session secret;
+- in production: ClamAV selected, malware required, scanner bypass disabled.
+
+The web health route validates auth runtime and probes PostgreSQL/object storage. The worker readiness command additionally checks the worker heartbeat/status, queue table, storage, scanner, and selected provider configuration.
+
+Production gates reject unsafe configuration, but they do not install TLS, secrets, IAM, backups, authorization, retention, monitoring, or incident response.
+
+## Migrations
+
+Run migrations as a separate deployment step before starting a new web/worker version:
 
 ```bash
-docker compose --profile app up --build
+npm run db:migrate
 ```
 
-This profile forces demo mode and mounts `research-workbench-data` at `/app/.data`. It does not run migrations or seed automatically. Run those against the container database before expecting the app to be ready.
+The runner serializes with an advisory lock, checks applied-file SHA-256, and applies each new file in a transaction. It is safe and expected to run twice. Migrations are forward-only. Back up PostgreSQL and object storage together; after a commit, recover by restoring the matching snapshots or deploying a forward fix. See [Migrating from v0.1](MIGRATING_FROM_V0_1.md).
 
-## Health and shutdown
+Do not run `db:reset` in deployment. It requires `ALLOW_DATABASE_RESET=true` because it truncates application state.
 
-`GET /api/health` performs `SELECT 1` and returns:
+## Health and readiness
 
-- `200` with `status: ok`, database connectivity, and demo/live configuration mode; or
-- `503` with `status: degraded` when PostgreSQL is unavailable.
+| Probe | Meaning | Does not prove |
+| --- | --- | --- |
+| `GET /api/health` | Auth configuration parsed; PostgreSQL and object storage responded | worker, scanner, provider, migration currency, end-to-end run |
+| `GET /api/workers/readiness?workerId=...` | Stored worker heartbeat is current and READY | scanner/storage/provider dependencies |
+| `WORKER_ID=... npm run worker:readiness` | Worker, queue, storage, scanner, and selected providers are usable | research quality, external SLA |
+| `npm run doctor` | Local Node/Docker/DB/schema/browser/storage/config diagnostics | production security or load readiness |
 
-It is a liveness/readiness aid, not an authenticated operations endpoint and not a provider/storage check. `npm run db:stop` stops only the Compose database service; it does not delete the volume.
+Health responses use no-store. Set process/container timeouts so the worker's graceful stop period fits inside the platform termination window.
 
-## Environment handling
+## Worker rollout and recovery
 
-Use the variables documented in the root README. In a nonlocal environment:
+Stop old workers from claiming, allow them to drain, and wait for active leases or the shutdown grace period before replacing the image. The worker marks `DRAINING`, aborts remaining handlers after grace, and releases leases. A healthy worker recovers expired work.
 
-- supply `DATABASE_URL` and provider secrets from a secret manager;
-- use least-privilege database credentials rather than the Compose demo password;
-- mount `STORAGE_DIR` on private durable storage with backup/retention controls;
-- set `PDF_FONT_PATH` to a verified font when required language coverage matters;
-- keep `DEMO_MODE=true` until live egress and data-use review are complete;
-- do not expose `TEST_DATABASE_URL` or destructive reset permission to the runtime.
+The queue is at least once, not exactly once. Do not roll out a handler that is incompatible with already queued input or stored stage schema. If compatibility must change, version the job/stage contract and provide reconciliation.
 
-## Verification commands
+## Object storage and scanner
 
-The following are commands to execute and record during a deployment; this document does not claim their outcome:
+For S3-compatible storage:
 
-| Check | Command/evidence |
-| --- | --- |
-| Configuration and dependencies | `npm run doctor` |
-| Migrations | `npm run db:migrate` and inspect `schema_migrations` |
-| Static checks and build | `npm run lint`, `npm run typecheck`, `npm run build` |
-| Automated tests | `npm test`; separately run `npm run test:e2e` |
-| Health | `curl --fail http://127.0.0.1:3100/api/health` |
-| Fixture workflow | `npm run seed`, then exercise the project API/UI |
-| Delivery artifacts | `npm run export-demo`; open and inspect each format |
-| Backup/restore | Environment-specific backup followed by a restore drill |
+- create a private bucket before web/worker start;
+- use least-privilege credentials and network policy;
+- configure encryption, backup/versioning, lifecycle, retention/legal hold, and restore;
+- keep signed URL TTL short and verify application origin/referrer behavior;
+- monitor catalog-versus-object integrity and orphan cleanup.
 
-The configured Playwright directory is `e2e/`. Its desktop navigation/workflow and mobile-project specs use the application plus PostgreSQL, and download/parse real exports. Record the actual run result; test-file presence alone is not browser-level evidence.
+For ClamAV:
 
-## Production-readiness blockers
+- persist and update signatures;
+- monitor daemon readiness/version/database age;
+- size memory for whole-object buffering plus scanning;
+- keep the fail-closed policy;
+- treat mock or bypassed scans as non-production evidence.
 
-Do not expose the current app to untrusted users or customer data until at least these are implemented and verified:
+## Observability
 
-- authenticated identities, secure sessions, authorization, approver roles, and tenant isolation;
-- CSRF policy, trusted proxy configuration, distributed rate limits, quotas, and abuse handling;
-- HTTPS, HSTS at the edge, managed secrets, network restrictions, database TLS, and credential rotation;
-- managed PostgreSQL backups, point-in-time recovery, migration rollback/forward-fix practice, monitoring, and connection limits;
-- durable private object storage, antivirus/quarantine for uploads, retention/deletion policy, and restore behavior;
-- a background job/lease/retry system for provider and export workloads;
-- live-provider data governance, spending limits, retry/idempotency policy, and audited smoke tests;
-- broader integration/browser coverage for production identity, authorization, tenant isolation, recovery, and destructive-operation policies;
-- resource limits, structured logs, metrics, traces, alerts, incident response, and dependency/container scanning;
-- target-environment PDF/DOCX visual/font compatibility and continued regression coverage for formula neutralization and strict blocker enforcement.
+Collect JSON-line stdout/stderr from web/worker/CLI, protect it as potentially sensitive, and retain job/run/provider/document identifiers for correlation. Poll or adapt authenticated `/api/metrics` and worker endpoints into the deployment's metrics/alert system.
 
-## CI
+At minimum alert on:
 
-The GitHub Actions workflow is configured for pushes to `main` and pull requests. It starts PostgreSQL, installs Node 22 dependencies, migrates, seeds, lints, typechecks, tests, builds, installs Chromium, and invokes Playwright. It uploads browser artifacts only on failure. Treat CI configuration as intent; verify that every named directory/script exists and that the workflow actually ran on the commit being handed off.
+- no READY worker or stale heartbeat;
+- increasing queue depth/oldest age;
+- dead-letter or repeated retry growth;
+- provider failure/unknown-cost/budget blocks;
+- scanner/storage failures and infected documents;
+- run-stage failures/blocks;
+- QA blockers and export persistence failures;
+- migration/checksum failure.
+
+The repository supplies aggregates and logs, not Prometheus/OpenTelemetry exporters, dashboards, SLOs, alerts, or an external audit sink.
+
+## Verification
+
+Record results for the exact deployable revision:
+
+```bash
+npm run docs:validate
+npm run validate:secrets
+npm run lint
+npm run typecheck
+npm test
+npm run build
+npm run test:e2e
+npm run eval:mock
+npm run release:verify
+```
+
+Also validate `docker compose config --quiet`, build web/worker/migrate, verify the non-root UID, start the full environment, probe worker readiness, seed the synthetic fixture, and run `npm run smoke:research-run` in the container. CI configuration is intent; require its actual successful run on the same commit.
+
+Before creating a release tag, enable GitHub immutable releases for the repository. Add an active ruleset for that exact version tag which blocks update and deletion, has no bypass actors, and does not block initial creation; do not apply this lock to a moving major/minor tag. The release workflow uses read-only checkout credentials, grants write permission only to its publish job, and re-resolves the remote tag immediately before draft creation and publication. After publication it verifies GitHub's release attestation and each local asset against the immutable release. Drafts remain editable until publication so every asset and checksum can be redownloaded and checked first.
+
+## Production-readiness checklist
+
+Before exposure to untrusted users or customer data:
+
+- implement and test authorization roles and tenant isolation;
+- terminate TLS/HSTS and configure trusted proxy/origin/client address behavior;
+- use managed secrets, least-privilege database/storage credentials, database TLS, and egress restrictions;
+- add managed backups/PITR and restore drills for PostgreSQL plus object storage;
+- define retention, deletion, legal hold, audit/log access, and incident response;
+- deploy distributed abuse/rate controls and provider spend/billing reconciliation;
+- add metrics/tracing exporters, SLOs, alerts, capacity tests, and failure exercises;
+- complete accessibility/cross-browser and target PDF/DOCX compatibility evidence;
+- document vulnerability/dependency/container/infrastructure management.
+
+Until then, keep the application loopback/private and follow [Limitations](LIMITATIONS.md).

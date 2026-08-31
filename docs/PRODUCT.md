@@ -2,79 +2,63 @@
 
 ## Product statement
 
-AI Research Workbench is a local research-operations MVP for producing source-backed reports with an inspectable evidence chain and an explicit human delivery decision. It is designed for a researcher or small research team that needs more rigor than a chat transcript but does not yet need a multi-tenant research platform.
-
-The product promise is narrow: every material report claim should be traceable to verified evidence, every known gap or conflict should remain visible, and no final delivery bundle should be created until strict QA and human approval have completed.
+AI Research Workbench helps a small controlled research team turn a scoped brief into an evidence-traceable, QA-checked, human-approved delivery package. It keeps the reasoning between a source and report visible and gives operators durable execution/recovery evidence without requiring live provider keys.
 
 ## Users and jobs
 
-| User | Job | Current implementation |
-| --- | --- | --- |
-| Research operator | Turn a brief into questions, a plan, sources, claims, findings, and a report | Project/workflow APIs, PostgreSQL records, and provider-backed plan suggestions (mock by default) |
-| Reviewer | Check provenance, limitations, conflicts, and QA findings | Claim/evidence ledger, revisions, QA records, audit events |
-| Approver | Make the final delivery decision | Explicit request/approve/deliver transitions and approval-gated ZIP |
-| Local evaluator | Exercise the complete data model without provider keys | Synthetic `project-demo` seed and mock providers |
+| User | Primary job |
+| --- | --- |
+| Research operator | Scope work, acquire sources, review evidence/claims/findings, supervise runs |
+| Reviewer | Inspect provenance, conflicts, gaps, revisions, and QA blockers |
+| Approver | Record an explicit final decision after QA and review |
+| Operations owner | Monitor queue/workers/providers/documents/evaluations and recover failures |
 
-The current application treats these as workflow roles, not authenticated identities. It runs as a single trusted local user.
+v0.2 authenticates named operators, but does not enforce these workflow roles as permissions. Every authenticated operator shares access to the installation.
 
-## Core principles
+## Principles
 
-1. **Evidence before prose.** Sources are registered, evidence is extracted and verified, and claims are linked before findings or recommendations are trusted.
-2. **AI proposes; code and people decide.** Provider output is schema-validated and source-ID bounded. Deterministic rules and human approval remain outside the model.
-3. **Uncertainty stays visible.** Outdated sources, duplicates, refuting evidence, and research gaps are recorded rather than silently removed.
-4. **Completion requires proof.** Progress derives from eight workflow gates. A `100%` value is not a substitute for QA, approval, exports, tests, or artifact inspection.
-5. **The demo is unmistakably synthetic.** Seeded data uses `[SAMPLE]`, fixture metadata, and example-only URLs.
+- Evidence before prose: preserve source → evidence → claim → finding → deliverable.
+- Deterministic gates remain authoritative: a model cannot approve or clear QA blockers.
+- Human approval is explicit and invalidated by material downstream change.
+- Every durable mutation has project scope and audit/provenance.
+- External content, uploads, and model output are untrusted.
+- Mock providers are the default; live calls are deliberate and isolated.
+- Queue delivery is at least once, so effects must be idempotent and recoverable.
+- File/route/status existence is not completion evidence; behavior must run.
 
-## Implemented capability
+## v0.2 capability
 
-- Quick, detailed, JSON, and Markdown project-intake validation.
-- Project, scope, question, and research-plan persistence.
-- Manual/search/fetch/upload/import/reuse source acquisition with freshness, duplicate, provenance, private-storage, and sanitized-content fields.
-- Evidence verification and claim relationships (`SUPPORTS`, `REFUTES`, `CONTEXT`).
-- Claim support calculation from verified evidence and source freshness.
-- Findings linked to claims.
-- An eleven-section report with revision history.
-- Fourteen deterministic QA rules and persisted findings.
-- Scope, plan, QA, approval, and delivery state transitions with audit records.
-- In-process Markdown, HTML, PDF, DOCX, CSV, and ZIP export generation.
-- Mock AI/search providers plus optional OpenAI and Brave adapters, a provider-status route, and a one-stage-at-a-time persisted pipeline route.
-- PostgreSQL-backed service APIs, raw migrations, local Compose, CI configuration, and diagnostics.
+- Responsive dashboard, project workflow, provenance/detail, report/revision, QA/approval/export, audit, sessions, operations, jobs, runs, documents, evaluations, and provider screens.
+- PostgreSQL research graph, approval revisions, progress invalidation, audit events, and strict blocker semantics.
+- Minimal operator auth with Argon2id, opaque durable sessions, CSRF/origin checks, login throttling, password rotation, and session revocation.
+- Durable worker leases, heartbeat, attempts, retry/backoff, cancellation, timeout, recovery, dead letter, and operator actions.
+- Eleven-stage orchestrator with frozen revisions/config/budget, source allowlists, shared provider permits, generations/fences, and idempotent domain commits.
+- Manual/search/safe-fetch/import/reuse sources plus quarantined PDF/DOCX/TXT/HTML/Markdown/CSV/JSON scan/extraction/chunk/anchor flow.
+- Contained local or private S3-compatible storage, ClamAV integration, and integrity-aware export persistence.
+- Deterministic mock AI/search, optional OpenAI/Brave, bounded live canary, ten-fixture mock evaluation, and usage/cost provenance.
+- Markdown, HTML, PDF, DOCX, CSV, and approval-gated ZIP generation.
 
 ## Completion definition
 
-A research project is complete only when all eight gates are true:
+A research package is ready for delivery only when:
 
-1. Scope confirmed.
-2. Plan approved.
-3. Questions researched.
-4. Included claims have usable support, with evidence verification and scope decisions recorded.
-5. Report written.
-6. QA passed with no unresolved blocker.
-7. Human approved.
-8. A current persisted ZIP delivery package generated.
+1. scope and plan revisions are approved;
+2. critical questions and accepted gaps are explicit;
+3. claims link to project-owned evidence and source provenance;
+4. report requirements are present;
+5. deterministic QA has no unresolved blocker;
+6. a named operator records final approval;
+7. a current ZIP is generated from the unchanged approved snapshot;
+8. the artifact bytes/hash can be read from private storage.
 
-The resulting progress values are rounded eighths (`0`, `13`, `25`, `38`, `50`, `63`, `75`, `88`, `100`). A blocker marked `ACCEPTED_RISK` is still a blocker; only `RESOLVED` clears it.
+A completed background run is not a completed research project. A passing mock eval is not live research accuracy. A generated file is not final delivery without the approval/currentness gates.
 
-## Current product boundary
+## Boundary and non-goals
 
-The current checkout provides domain logic, PostgreSQL services, route handlers, exports, a responsive shell, and browser pages for dashboard, project list/create/overview, scope, plan, sources/detail/evidence, claim/evidence ledger, findings, report/revisions, QA, approval/export, audit, and read-only provider settings.
+The current product is local/internal and single-installation. It is not a public autonomous research agent, multi-tenant SaaS, source-of-truth oracle, web crawler, paywall bypass, billing marketplace, public portal, or real-time collaborative editor.
 
-Source acquisition exposes manual entry, provider search, SSRF-resistant URL fetch, multipart upload, JSON/Markdown import, and reuse. The typed pipeline route can run and persist any one AI stage. Normal plan generation applies provider-backed question-decomposition/research-plan suggestions (mock by default), but the product is not an automatic end-to-end research agent and every suggested plan still requires human approval.
+Roles/tenant isolation, MFA/SSO, public deployment controls, managed backup/retention, OCR, full office-format fidelity, recipient delivery, and exactly-once execution are not implemented. See [Limitations](LIMITATIONS.md) and [Roadmap](ROADMAP.md).
 
-There is no production authentication, role enforcement, tenancy isolation, hosted object storage, worker, automatic delivery, collaborative editing, or customer-facing portal. The database has workspace/client fields for the domain model, but those fields do not constitute a security boundary.
+## Verification evidence
 
-Supported upload types are CSV, DOCX, HTML, JSON, Markdown, PDF, and plain text. Text/HTML/JSON content can be normalized; PDF/DOCX are stored with a manual-extraction notice. Recognition and signature validation do not imply malware scanning or complete document validation.
-
-## Non-goals for the MVP
-
-- Fully autonomous research or approval.
-- A guarantee that source content, model output, or generated conclusions are true.
-- Legal, medical, financial, or compliance advice.
-- Crawling arbitrary sites or bypassing paywalls.
-- Production identity, billing, collaboration, or multi-tenant administration.
-- A general document editor or real-time collaboration suite.
-- Pixel-perfect compatibility with every PDF reader, office suite, or font.
-
-## Evidence of readiness
-
-Readiness must be established by executing the commands in the root README, exercising state transitions through the APIs/browser surface that exists at handoff, inspecting generated files, and recording limitations. Configured scripts, source-file counts, screenshots, seeded status fields, or a stored `progress` value are supporting evidence only; none proves the full workflow by itself.
+Use [Testing](TESTING.md) for executable lanes, [Operations](OPERATIONS.md) for recovery semantics, and [Migrating from v0.1](MIGRATING_FROM_V0_1.md) for forward-only upgrade/rollback. Screenshots and management metadata are navigation/documentation aids, not proof of product completion.

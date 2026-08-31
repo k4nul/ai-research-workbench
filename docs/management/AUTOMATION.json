@@ -1,0 +1,368 @@
+{
+  "schemaVersion": "2.0",
+  "id": "auto.repository.v2",
+  "kind": "automation",
+  "applicationVersion": "0.2.0",
+  "commands": [
+    {
+      "id": "auto.command.dev",
+      "name": "dev",
+      "command": "npm run dev",
+      "purpose": "Start the loopback Next.js development server."
+    },
+    {
+      "id": "auto.command.dev-all",
+      "name": "dev:all",
+      "command": "npm run dev:all",
+      "purpose": "Start development web and worker together."
+    },
+    {
+      "id": "auto.command.start",
+      "name": "start",
+      "command": "npm run start",
+      "purpose": "Start a built Next.js server."
+    },
+    {
+      "id": "auto.command.worker",
+      "name": "worker",
+      "command": "npm run worker",
+      "purpose": "Start the durable worker."
+    },
+    {
+      "id": "auto.command.worker-readiness",
+      "name": "worker:readiness",
+      "command": "npm run worker:readiness",
+      "purpose": "Probe a configured worker and its dependencies."
+    },
+    {
+      "id": "auto.command.build",
+      "name": "build",
+      "command": "npm run build",
+      "purpose": "Build the Next.js production bundle."
+    },
+    {
+      "id": "auto.command.lint",
+      "name": "lint",
+      "command": "npm run lint",
+      "purpose": "Run ESLint."
+    },
+    {
+      "id": "auto.command.typecheck",
+      "name": "typecheck",
+      "command": "npm run typecheck",
+      "purpose": "Run TypeScript without emitting."
+    },
+    {
+      "id": "auto.command.test",
+      "name": "test",
+      "command": "npm run test",
+      "purpose": "Prepare the test database and run all Vitest tests."
+    },
+    {
+      "id": "auto.command.test-watch",
+      "name": "test:watch",
+      "command": "npm run test:watch",
+      "purpose": "Run Vitest in watch mode."
+    },
+    {
+      "id": "auto.command.test-unit",
+      "name": "test:unit",
+      "command": "npm run test:unit",
+      "purpose": "Run unit tests."
+    },
+    {
+      "id": "auto.command.test-integration",
+      "name": "test:integration",
+      "command": "npm run test:integration",
+      "purpose": "Prepare PostgreSQL and run integration tests."
+    },
+    {
+      "id": "auto.command.test-workers",
+      "name": "test:workers",
+      "command": "npm run test:workers",
+      "purpose": "Run durable worker and operational service tests."
+    },
+    {
+      "id": "auto.command.test-documents",
+      "name": "test:documents",
+      "command": "npm run test:documents",
+      "purpose": "Run document/storage/scanner tests."
+    },
+    {
+      "id": "auto.command.test-providers",
+      "name": "test:providers",
+      "command": "npm run test:providers",
+      "purpose": "Run mocked provider unit and contract tests."
+    },
+    {
+      "id": "auto.command.test-providers-live",
+      "name": "test:providers:live",
+      "command": "npm run test:providers:live",
+      "purpose": "Run the optional bounded live provider canary."
+    },
+    {
+      "id": "auto.command.test-prepare",
+      "name": "test:prepare",
+      "command": "npm run test:prepare",
+      "purpose": "Prepare a safely named PostgreSQL test database."
+    },
+    {
+      "id": "auto.command.test-e2e",
+      "name": "test:e2e",
+      "command": "npm run test:e2e",
+      "purpose": "Run Playwright browser tests."
+    },
+    {
+      "id": "auto.command.verify",
+      "name": "verify",
+      "command": "npm run verify",
+      "purpose": "Run lint, typecheck, documentation validation, all Vitest, and build."
+    },
+    {
+      "id": "auto.command.db-start",
+      "name": "db:start",
+      "command": "npm run db:start",
+      "purpose": "Start the Compose PostgreSQL service."
+    },
+    {
+      "id": "auto.command.db-stop",
+      "name": "db:stop",
+      "command": "npm run db:stop",
+      "purpose": "Stop the Compose PostgreSQL service without deleting its volume."
+    },
+    {
+      "id": "auto.command.db-migrate",
+      "name": "db:migrate",
+      "command": "npm run db:migrate",
+      "purpose": "Apply ordered forward-only migrations."
+    },
+    {
+      "id": "auto.command.migrate",
+      "name": "migrate",
+      "command": "npm run migrate",
+      "purpose": "Alias the migration command for automation."
+    },
+    {
+      "id": "auto.command.db-reset",
+      "name": "db:reset",
+      "command": "npm run db:reset",
+      "purpose": "Destructively reset an explicitly authorized disposable database."
+    },
+    {
+      "id": "auto.command.seed",
+      "name": "seed",
+      "command": "npm run seed",
+      "purpose": "Seed the visibly synthetic demo project."
+    },
+    {
+      "id": "auto.command.setup",
+      "name": "setup",
+      "command": "npm run setup",
+      "purpose": "Start PostgreSQL, migrate, and seed."
+    },
+    {
+      "id": "auto.command.export-demo",
+      "name": "export-demo",
+      "command": "npm run export-demo",
+      "purpose": "Generate synthetic demo review artifacts."
+    },
+    {
+      "id": "auto.command.eval",
+      "name": "eval",
+      "command": "npm run eval",
+      "purpose": "Alias the deterministic mock evaluation."
+    },
+    {
+      "id": "auto.command.eval-mock",
+      "name": "eval:mock",
+      "command": "npm run eval:mock",
+      "purpose": "Run the ten-fixture deterministic evaluation."
+    },
+    {
+      "id": "auto.command.eval-live",
+      "name": "eval:live",
+      "command": "npm run eval:live",
+      "purpose": "Record the explicit unscored live-evaluation boundary."
+    },
+    {
+      "id": "auto.command.smoke-research-run",
+      "name": "smoke:research-run",
+      "command": "npm run smoke:research-run",
+      "purpose": "Execute all eleven mock stages through durable orchestration."
+    },
+    {
+      "id": "auto.command.release-prepare",
+      "name": "release:prepare",
+      "command": "npm run release:prepare",
+      "purpose": "Generate the v0.2 release evidence bundle."
+    },
+    {
+      "id": "auto.command.release-verify",
+      "name": "release:verify",
+      "command": "npm run release:verify",
+      "purpose": "Require the exact release asset and checksum sets, then parse every artifact."
+    },
+    {
+      "id": "auto.command.operator-create",
+      "name": "operator:create",
+      "command": "npm run operator:create",
+      "purpose": "Provision a named operator through prompt or controlled stdin."
+    },
+    {
+      "id": "auto.command.cleanup-orphans",
+      "name": "cleanup:orphans",
+      "command": "npm run cleanup:orphans",
+      "purpose": "Reconcile private object-storage orphans."
+    },
+    {
+      "id": "auto.command.validate-secrets",
+      "name": "validate:secrets",
+      "command": "npm run validate:secrets",
+      "purpose": "Scan candidate repository files for forbidden runtime paths and common secrets."
+    },
+    {
+      "id": "auto.command.docs-validate",
+      "name": "docs:validate",
+      "command": "npm run docs:validate",
+      "purpose": "Strictly validate documentation management metadata and local links."
+    },
+    {
+      "id": "auto.command.doctor",
+      "name": "doctor",
+      "command": "npm run doctor",
+      "purpose": "Run local runtime and dependency diagnostics."
+    },
+    {
+      "id": "auto.command.screenshots",
+      "name": "screenshots",
+      "command": "npm run screenshots",
+      "purpose": "Capture the synthetic dashboard and project screenshots."
+    }
+  ],
+  "entrypoints": [
+    {
+      "id": "auto.entry.migrate",
+      "scriptPath": "scripts/migrate.ts",
+      "packageScript": "db:migrate",
+      "effect": "Schema mutation under advisory lock."
+    },
+    {
+      "id": "auto.entry.worker",
+      "scriptPath": "worker/main.ts",
+      "packageScript": "worker",
+      "effect": "Claims and executes durable jobs."
+    },
+    {
+      "id": "auto.entry.worker-readiness",
+      "scriptPath": "scripts/worker-readiness.ts",
+      "packageScript": "worker:readiness",
+      "effect": "Read-only dependency/readiness probe."
+    },
+    {
+      "id": "auto.entry.operator-create",
+      "scriptPath": "scripts/operator-create.ts",
+      "packageScript": "operator:create",
+      "effect": "Creates an operator and audit record."
+    },
+    {
+      "id": "auto.entry.eval",
+      "scriptPath": "scripts/eval.ts",
+      "packageScript": "eval:mock",
+      "effect": "Creates persisted synthetic evaluation projects/runs/artifacts."
+    },
+    {
+      "id": "auto.entry.canary",
+      "scriptPath": "scripts/provider-canary.ts",
+      "packageScript": "test:providers:live",
+      "effect": "Optional external synthetic provider calls and persisted results."
+    },
+    {
+      "id": "auto.entry.release-prepare",
+      "scriptPath": "scripts/release-artifacts.ts",
+      "packageScript": "release:prepare",
+      "effect": "Recreates local release artifacts."
+    },
+    {
+      "id": "auto.entry.release-verify",
+      "scriptPath": "scripts/verify-release-artifacts.ts",
+      "packageScript": "release:verify",
+      "effect": "Read-only release asset verification."
+    },
+    {
+      "id": "auto.entry.cleanup",
+      "scriptPath": "scripts/cleanup-orphans.ts",
+      "packageScript": "cleanup:orphans",
+      "effect": "Can delete tracked/untracked objects only according to explicit options."
+    },
+    {
+      "id": "auto.entry.docs",
+      "scriptPath": "scripts/validate-management.ts",
+      "packageScript": "docs:validate",
+      "effect": "Read-only documentation and management validation."
+    }
+  ],
+  "workflows": [
+    {
+      "id": "auto.workflow.ci",
+      "name": "Required continuous integration",
+      "workflowPath": ".github/workflows/ci.yml",
+      "purpose": "Quality, integration, document security, provider contracts, evaluation, browser, and container lanes."
+    },
+    {
+      "id": "auto.workflow.live-canary",
+      "name": "Optional live provider canary",
+      "workflowPath": ".github/workflows/live-canary.yml",
+      "purpose": "Scheduled/manual bounded synthetic external compatibility check."
+    },
+    {
+      "id": "auto.workflow.release",
+      "name": "Exact-commit v0.2 release",
+      "workflowPath": ".github/workflows/release.yml",
+      "purpose": "Require mandatory CI, refuse an existing release, generate/verify/draft/redownload/verify/publish exact release assets."
+    }
+  ],
+  "testLanes": [
+    {
+      "id": "auto.lane.unit",
+      "command": "npm run test:unit",
+      "environment": "No database preparation; no live provider keys.",
+      "evidence": "Pure and bounded component behavior."
+    },
+    {
+      "id": "auto.lane.integration",
+      "command": "npm run test:integration",
+      "environment": "TEST_DATABASE_URL must name a test database.",
+      "evidence": "PostgreSQL-backed workflow and operational behavior."
+    },
+    {
+      "id": "auto.lane.documents",
+      "command": "npm run test:documents",
+      "environment": "S3 and ClamAV adapters require local services/requirement flags for full coverage.",
+      "evidence": "Document, object-storage, scanner, and extraction boundaries."
+    },
+    {
+      "id": "auto.lane.providers",
+      "command": "npm run test:providers",
+      "environment": "Fetch mocked; credentials/network forbidden.",
+      "evidence": "Provider schemas, errors, and source-ID containment."
+    },
+    {
+      "id": "auto.lane.evaluation",
+      "command": "npm run eval:mock",
+      "environment": "Migrated PostgreSQL; deterministic mock providers.",
+      "evidence": "Ten labeled fixtures and reproducible persisted runs."
+    },
+    {
+      "id": "auto.lane.browser",
+      "command": "npm run test:e2e",
+      "environment": "Migrated/seeded PostgreSQL and installed Chromium.",
+      "evidence": "Authenticated desktop, mobile emulation, and auth browser behavior."
+    },
+    {
+      "id": "auto.lane.main-gate",
+      "command": "npm run verify",
+      "environment": "PostgreSQL and build prerequisites; excludes Playwright.",
+      "evidence": "Lint, typecheck, documentation validation, all Vitest, and production build."
+    }
+  ]
+}

@@ -1,0 +1,461 @@
+{
+  "schemaVersion": "2.0",
+  "id": "arch.repository.v2",
+  "kind": "architecture",
+  "applicationVersion": "0.2.0",
+  "deliverySemantics": {
+    "id": "arch.delivery.at-least-once",
+    "queue": "PostgreSQL",
+    "semantics": "at-least-once",
+    "exactlyOnceExecution": false,
+    "requiredControl": "Idempotent and fenced domain/external effects"
+  },
+  "components": [
+    {
+      "id": "arch.component.web",
+      "sourcePath": "app",
+      "responsibility": "Next.js pages and authenticated API routes."
+    },
+    {
+      "id": "arch.component.proxy",
+      "sourcePath": "proxy.ts",
+      "responsibility": "Early public-path, cookie-presence, and loopback demo-bypass enforcement."
+    },
+    {
+      "id": "arch.component.auth",
+      "sourcePath": "lib/auth",
+      "responsibility": "Runtime, session, password, CSRF, and principal data-access boundary."
+    },
+    {
+      "id": "arch.component.services",
+      "sourcePath": "lib/services",
+      "responsibility": "Transactional project-scoped workflow and operational persistence."
+    },
+    {
+      "id": "arch.component.domain",
+      "sourcePath": "lib/domain",
+      "responsibility": "Pure workflow, job, run, research, and QA rules."
+    },
+    {
+      "id": "arch.component.worker",
+      "sourcePath": "worker",
+      "responsibility": "Durable polling, leases, recovery, and registered handlers."
+    },
+    {
+      "id": "arch.component.pipeline",
+      "sourcePath": "lib/execution",
+      "responsibility": "Versioned eleven-stage research catalog."
+    },
+    {
+      "id": "arch.component.providers",
+      "sourcePath": "lib/providers",
+      "responsibility": "Deterministic mock and optional OpenAI/Brave adapters."
+    },
+    {
+      "id": "arch.component.budgets",
+      "sourcePath": "lib/budgets",
+      "responsibility": "Frozen resource limits and explicit cost status."
+    },
+    {
+      "id": "arch.component.documents",
+      "sourcePath": "lib/documents",
+      "responsibility": "Scanning, extraction, chunking, anchors, and document states."
+    },
+    {
+      "id": "arch.component.storage",
+      "sourcePath": "lib/storage",
+      "responsibility": "Contained local and private S3-compatible object storage."
+    },
+    {
+      "id": "arch.component.security",
+      "sourcePath": "lib/security",
+      "responsibility": "SSRF, file, sanitization, and hostile-content controls."
+    },
+    {
+      "id": "arch.component.export",
+      "sourcePath": "lib/export",
+      "responsibility": "Snapshot and delivery artifact rendering."
+    },
+    {
+      "id": "arch.component.migrations",
+      "sourcePath": "migrations",
+      "responsibility": "Ordered additive forward-only SQL migrations."
+    }
+  ],
+  "dataStores": [
+    {
+      "id": "arch.store.postgresql",
+      "sourcePath": "lib/db.ts",
+      "role": "Authoritative research graph, auth, queue, run, provider, evaluation, storage catalog, and audit state."
+    },
+    {
+      "id": "arch.store.local-object",
+      "sourcePath": "lib/storage/local.ts",
+      "role": "Contained private filesystem objects for local development."
+    },
+    {
+      "id": "arch.store.s3-object",
+      "sourcePath": "lib/storage/s3.ts",
+      "role": "One configured private S3-compatible bucket with integrity metadata."
+    }
+  ],
+  "contracts": [
+    {
+      "id": "arch.contract.jobs",
+      "sourcePath": "lib/domain/jobs.ts",
+      "statement": "Jobs use at-least-once delivery, leases, attempts, bounded retry classes, cancellation, and terminal history."
+    },
+    {
+      "id": "arch.contract.run-stages",
+      "sourcePath": "lib/services/run-stages.ts",
+      "statement": "Run-stage generation plus job/attempt/worker fence guards every start and commit."
+    },
+    {
+      "id": "arch.contract.orchestration",
+      "sourcePath": "lib/services/research-orchestrator.ts",
+      "statement": "Strict stage schemas and source allowlists precede transactional domain effects."
+    },
+    {
+      "id": "arch.contract.documents",
+      "sourcePath": "lib/services/documents.ts",
+      "statement": "Only clean or explicitly bypassed local-demo objects can be extracted; new anchors invalidate old citations."
+    },
+    {
+      "id": "arch.contract.audit",
+      "sourcePath": "lib/auth/audit-actor.ts",
+      "statement": "Authenticated HTTP mutations derive user actors from the durable principal."
+    },
+    {
+      "id": "arch.contract.http-idempotency",
+      "sourcePath": "lib/services/mutation-receipts.ts",
+      "statement": "JSON mutations atomically store a principal/method/path/key receipt and exact bounded response; multipart uploads use durable document-specific idempotency."
+    },
+    {
+      "id": "arch.contract.qa",
+      "sourcePath": "lib/domain/qa.ts",
+      "statement": "Only RESOLVED clears a blocker; model output cannot approve or deliver."
+    },
+    {
+      "id": "arch.contract.migrations",
+      "sourcePath": "scripts/migrate.ts",
+      "statement": "Migrations are ordered, transactional, advisory-lock protected, checksum verified, and forward-only."
+    }
+  ],
+  "routes": [
+    {
+      "id": "arch.route.health.get",
+      "method": "GET",
+      "route": "/api/health",
+      "sourcePath": "app/api/health/route.ts",
+      "purpose": "Public configuration, database, and object-storage health."
+    },
+    {
+      "id": "arch.route.auth-login.post",
+      "method": "POST",
+      "route": "/api/auth/login",
+      "sourcePath": "app/api/auth/login/route.ts",
+      "purpose": "Authenticate an operator and issue session/CSRF cookies."
+    },
+    {
+      "id": "arch.route.auth-session.get",
+      "method": "GET",
+      "route": "/api/auth/session",
+      "sourcePath": "app/api/auth/session/route.ts",
+      "purpose": "Read the current durable operator session."
+    },
+    {
+      "id": "arch.route.auth-logout.post",
+      "method": "POST",
+      "route": "/api/auth/logout",
+      "sourcePath": "app/api/auth/logout/route.ts",
+      "purpose": "Revoke the current session."
+    },
+    {
+      "id": "arch.route.auth-password.patch",
+      "method": "PATCH",
+      "route": "/api/auth/password",
+      "sourcePath": "app/api/auth/password/route.ts",
+      "purpose": "Rotate password and replace sessions."
+    },
+    {
+      "id": "arch.route.auth-sessions.get",
+      "method": "GET",
+      "route": "/api/auth/sessions",
+      "sourcePath": "app/api/auth/sessions/route.ts",
+      "purpose": "List active sessions owned by the operator."
+    },
+    {
+      "id": "arch.route.auth-session-delete.delete",
+      "method": "DELETE",
+      "route": "/api/auth/sessions/:sessionId",
+      "sourcePath": "app/api/auth/sessions/[sessionId]/route.ts",
+      "purpose": "Revoke an operator-owned session."
+    },
+    {
+      "id": "arch.route.projects.get",
+      "method": "GET",
+      "route": "/api/projects",
+      "sourcePath": "app/api/projects/route.ts",
+      "purpose": "List research projects."
+    },
+    {
+      "id": "arch.route.projects.post",
+      "method": "POST",
+      "route": "/api/projects",
+      "sourcePath": "app/api/projects/route.ts",
+      "purpose": "Create a project."
+    },
+    {
+      "id": "arch.route.project.get",
+      "method": "GET",
+      "route": "/api/projects/:projectId",
+      "sourcePath": "app/api/projects/[projectId]/route.ts",
+      "purpose": "Read a project graph summary."
+    },
+    {
+      "id": "arch.route.project.patch",
+      "method": "PATCH",
+      "route": "/api/projects/:projectId",
+      "sourcePath": "app/api/projects/[projectId]/route.ts",
+      "purpose": "Update scoped project metadata."
+    },
+    {
+      "id": "arch.route.project.delete",
+      "method": "DELETE",
+      "route": "/api/projects/:projectId",
+      "sourcePath": "app/api/projects/[projectId]/route.ts",
+      "purpose": "Delete a project and reconcile storage."
+    },
+    {
+      "id": "arch.route.scope.post",
+      "method": "POST",
+      "route": "/api/projects/:projectId/scope",
+      "sourcePath": "app/api/projects/[projectId]/scope/route.ts",
+      "purpose": "Save or approve scope."
+    },
+    {
+      "id": "arch.route.plan.post",
+      "method": "POST",
+      "route": "/api/projects/:projectId/plan",
+      "sourcePath": "app/api/projects/[projectId]/plan/route.ts",
+      "purpose": "Generate, save, or approve a research plan."
+    },
+    {
+      "id": "arch.route.qa.get",
+      "method": "GET",
+      "route": "/api/projects/:projectId/qa",
+      "sourcePath": "app/api/projects/[projectId]/qa/route.ts",
+      "purpose": "List project QA findings."
+    },
+    {
+      "id": "arch.route.qa.post",
+      "method": "POST",
+      "route": "/api/projects/:projectId/qa",
+      "sourcePath": "app/api/projects/[projectId]/qa/route.ts",
+      "purpose": "Run deterministic QA."
+    },
+    {
+      "id": "arch.route.approval.post",
+      "method": "POST",
+      "route": "/api/projects/:projectId/approval",
+      "sourcePath": "app/api/projects/[projectId]/approval/route.ts",
+      "purpose": "Request, approve, or deliver."
+    },
+    {
+      "id": "arch.route.export.get",
+      "method": "GET",
+      "route": "/api/projects/:projectId/exports/:format",
+      "sourcePath": "app/api/projects/[projectId]/exports/[format]/route.ts",
+      "purpose": "Generate a non-persisting immediate download; persistence is POST-only."
+    },
+    {
+      "id": "arch.route.export.post",
+      "method": "POST",
+      "route": "/api/projects/:projectId/exports/:format",
+      "sourcePath": "app/api/projects/[projectId]/exports/[format]/route.ts",
+      "purpose": "Queue idempotent durable export generation from a frozen snapshot."
+    },
+    {
+      "id": "arch.route.documents.get",
+      "method": "GET",
+      "route": "/api/projects/:projectId/documents",
+      "sourcePath": "app/api/projects/[projectId]/documents/route.ts",
+      "purpose": "List project documents."
+    },
+    {
+      "id": "arch.route.documents.post",
+      "method": "POST",
+      "route": "/api/projects/:projectId/documents",
+      "sourcePath": "app/api/projects/[projectId]/documents/route.ts",
+      "purpose": "Quarantine and submit a document."
+    },
+    {
+      "id": "arch.route.document.get",
+      "method": "GET",
+      "route": "/api/projects/:projectId/documents/:documentId",
+      "sourcePath": "app/api/projects/[projectId]/documents/[documentId]/route.ts",
+      "purpose": "Read project-scoped document state."
+    },
+    {
+      "id": "arch.route.document.delete",
+      "method": "DELETE",
+      "route": "/api/projects/:projectId/documents/:documentId",
+      "sourcePath": "app/api/projects/[projectId]/documents/[documentId]/route.ts",
+      "purpose": "Delete a project-scoped document."
+    },
+    {
+      "id": "arch.route.document-scan.post",
+      "method": "POST",
+      "route": "/api/projects/:projectId/documents/:documentId/scan",
+      "sourcePath": "app/api/projects/[projectId]/documents/[documentId]/scan/route.ts",
+      "purpose": "Submit an idempotent document scan."
+    },
+    {
+      "id": "arch.route.document-extract.post",
+      "method": "POST",
+      "route": "/api/projects/:projectId/documents/:documentId/extract",
+      "sourcePath": "app/api/projects/[projectId]/documents/[documentId]/extract/route.ts",
+      "purpose": "Submit an idempotent extraction."
+    },
+    {
+      "id": "arch.route.document-download.get",
+      "method": "GET",
+      "route": "/api/projects/:projectId/documents/:documentId/download",
+      "sourcePath": "app/api/projects/[projectId]/documents/[documentId]/download/route.ts",
+      "purpose": "Download a private document."
+    },
+    {
+      "id": "arch.route.jobs.get",
+      "method": "GET",
+      "route": "/api/jobs",
+      "sourcePath": "app/api/jobs/route.ts",
+      "purpose": "List filtered jobs."
+    },
+    {
+      "id": "arch.route.job.get",
+      "method": "GET",
+      "route": "/api/jobs/:jobId",
+      "sourcePath": "app/api/jobs/[jobId]/route.ts",
+      "purpose": "Read job, attempt, and event history."
+    },
+    {
+      "id": "arch.route.job-cancel.post",
+      "method": "POST",
+      "route": "/api/jobs/:jobId/cancel",
+      "sourcePath": "app/api/jobs/[jobId]/cancel/route.ts",
+      "purpose": "Request idempotent project-scoped cancellation."
+    },
+    {
+      "id": "arch.route.job-retry.post",
+      "method": "POST",
+      "route": "/api/jobs/:jobId/retry",
+      "sourcePath": "app/api/jobs/[jobId]/retry/route.ts",
+      "purpose": "Retry failed non-pipeline work."
+    },
+    {
+      "id": "arch.route.runs.get",
+      "method": "GET",
+      "route": "/api/runs",
+      "sourcePath": "app/api/runs/route.ts",
+      "purpose": "List research runs."
+    },
+    {
+      "id": "arch.route.runs.post",
+      "method": "POST",
+      "route": "/api/runs",
+      "sourcePath": "app/api/runs/route.ts",
+      "purpose": "Create an idempotent orchestrated run."
+    },
+    {
+      "id": "arch.route.run.get",
+      "method": "GET",
+      "route": "/api/runs/:runId",
+      "sourcePath": "app/api/runs/[runId]/route.ts",
+      "purpose": "Read a project-scoped run."
+    },
+    {
+      "id": "arch.route.run-stages.get",
+      "method": "GET",
+      "route": "/api/runs/:runId/stages",
+      "sourcePath": "app/api/runs/[runId]/stages/route.ts",
+      "purpose": "List stage generations."
+    },
+    {
+      "id": "arch.route.run-cancel.post",
+      "method": "POST",
+      "route": "/api/runs/:runId/cancel",
+      "sourcePath": "app/api/runs/[runId]/cancel/route.ts",
+      "purpose": "Request run cancellation."
+    },
+    {
+      "id": "arch.route.run-resume.post",
+      "method": "POST",
+      "route": "/api/runs/:runId/resume",
+      "sourcePath": "app/api/runs/[runId]/resume/route.ts",
+      "purpose": "Resume a resumable run."
+    },
+    {
+      "id": "arch.route.stage-rerun.post",
+      "method": "POST",
+      "route": "/api/runs/:runId/stages/:stageId/rerun",
+      "sourcePath": "app/api/runs/[runId]/stages/[stageId]/rerun/route.ts",
+      "purpose": "Create a new stage generation."
+    },
+    {
+      "id": "arch.route.workers.get",
+      "method": "GET",
+      "route": "/api/workers",
+      "sourcePath": "app/api/workers/route.ts",
+      "purpose": "List worker heartbeat state."
+    },
+    {
+      "id": "arch.route.worker-readiness.get",
+      "method": "GET",
+      "route": "/api/workers/readiness",
+      "sourcePath": "app/api/workers/readiness/route.ts",
+      "purpose": "Read one worker readiness record."
+    },
+    {
+      "id": "arch.route.metrics.get",
+      "method": "GET",
+      "route": "/api/metrics",
+      "sourcePath": "app/api/metrics/route.ts",
+      "purpose": "Read aggregate operational metrics."
+    },
+    {
+      "id": "arch.route.providers.get",
+      "method": "GET",
+      "route": "/api/providers",
+      "sourcePath": "app/api/providers/route.ts",
+      "purpose": "Read provider configuration/operations state."
+    },
+    {
+      "id": "arch.route.provider-status.get",
+      "method": "GET",
+      "route": "/api/providers/status",
+      "sourcePath": "app/api/providers/status/route.ts",
+      "purpose": "Read bounded provider status."
+    },
+    {
+      "id": "arch.route.provider-canaries.get",
+      "method": "GET",
+      "route": "/api/providers/canaries",
+      "sourcePath": "app/api/providers/canaries/route.ts",
+      "purpose": "List synthetic live canary history."
+    },
+    {
+      "id": "arch.route.evaluations.get",
+      "method": "GET",
+      "route": "/api/evaluations",
+      "sourcePath": "app/api/evaluations/route.ts",
+      "purpose": "List evaluation history."
+    },
+    {
+      "id": "arch.route.audit.get",
+      "method": "GET",
+      "route": "/api/audit",
+      "sourcePath": "app/api/audit/route.ts",
+      "purpose": "List authenticated audit history."
+    }
+  ]
+}

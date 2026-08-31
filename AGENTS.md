@@ -9,7 +9,8 @@ These rules supplement the workspace-level `AGENTS.md` for work in this reposito
 - PostgreSQL is accessed through `pg`; schema changes are additive raw SQL migrations under `migrations/`. Do not introduce an ORM without an explicit architecture decision.
 - Preserve the source → evidence → claim → finding → deliverable graph and append audit events for state-changing workflow actions.
 - Mock providers are the default. Never make tests depend on provider keys or live network access.
-- The `jobs` table is a persistence contract only; do not imply a worker exists until one is implemented and tested.
+- The PostgreSQL `jobs` table and separate `DurableWorker` process implement at-least-once delivery. Preserve DB-time leases, heartbeats, attempt fencing, cooperative cancellation, bounded retry, idempotent external effects, and stage/domain commit keys; never describe this as exactly-once execution.
+- Keep uploaded, quarantine, promoted clean-source, extraction, evaluation, and export artifacts in the private local/S3 storage abstraction with cataloged size/SHA-256 metadata and compensating cleanup.
 
 ## Commands
 
@@ -19,7 +20,9 @@ npm run db:start
 npm run db:migrate
 npm run seed
 npm run dev
+npm run worker
 npm run doctor
+npm run eval:mock
 ```
 
 `ALLOW_DATABASE_RESET=true npm run db:reset` is destructive. Run it only against a confirmed disposable local database after checking `DATABASE_URL`. Database tests must use `TEST_DATABASE_URL`; its database name must contain `test`.

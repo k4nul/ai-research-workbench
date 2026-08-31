@@ -1,0 +1,185 @@
+{
+  "schemaVersion": "2.0",
+  "id": "agent.instructions.v2",
+  "kind": "agent-instructions",
+  "applicationVersion": "0.2.0",
+  "scope": {
+    "id": "agent.scope.repository",
+    "root": ".",
+    "statement": "Repository-local instructions for implementation, verification, release, and documentation work."
+  },
+  "sourceOfTruth": [
+    {
+      "id": "agent.source.implementation",
+      "priority": 1,
+      "paths": [
+        "app",
+        "lib",
+        "worker",
+        "migrations",
+        "scripts"
+      ],
+      "statement": "Executable implementation and migrations define current behavior."
+    },
+    {
+      "id": "agent.source.tests",
+      "priority": 2,
+      "paths": [
+        "tests",
+        "e2e",
+        "playwright.config.ts"
+      ],
+      "statement": "Passing behavior-level tests are evidence; test existence alone is not."
+    },
+    {
+      "id": "agent.source.configuration",
+      "priority": 3,
+      "paths": [
+        "package.json",
+        ".env.example",
+        "docker-compose.yml",
+        "Dockerfile"
+      ],
+      "statement": "Declared commands and runtime topology must match these files."
+    },
+    {
+      "id": "agent.source.documentation",
+      "priority": 4,
+      "paths": [
+        "README.md",
+        "docs",
+        "CHANGELOG.md"
+      ],
+      "statement": "Documentation explains verified implementation and must not overrule it."
+    }
+  ],
+  "rules": [
+    {
+      "id": "agent.rule.inspect-first",
+      "statement": "Inspect the nearest route, service, domain rule, migration, configuration, and test before changing behavior."
+    },
+    {
+      "id": "agent.rule.small-diff",
+      "statement": "Make the smallest scoped change, preserve unrelated worktree changes, and avoid new dependencies unless necessary."
+    },
+    {
+      "id": "agent.rule.project-graph",
+      "statement": "Preserve source-to-evidence-to-claim-to-finding-to-deliverable provenance and project scoping."
+    },
+    {
+      "id": "agent.rule.audit",
+      "statement": "State-changing workflow/operator actions require principal-derived or bounded system audit identity."
+    },
+    {
+      "id": "agent.rule.queue-semantics",
+      "statement": "Describe the queue as at-least-once, never exactly-once, and make new effects replay-safe."
+    },
+    {
+      "id": "agent.rule.mock-default",
+      "statement": "Normal tests use deterministic mock providers and do not require credentials or live network access."
+    },
+    {
+      "id": "agent.rule.ui-evidence",
+      "statement": "Visible UI behavior requires browser interaction evidence; components or screenshots alone are insufficient."
+    },
+    {
+      "id": "agent.rule.forward-only",
+      "statement": "Applied migrations are immutable and forward-only; recovery is matching snapshot restore or a new forward fix."
+    },
+    {
+      "id": "agent.rule.no-unearned-completion",
+      "statement": "Do not mark completion from status fields, paths, counts, or declarations when behavior-level evidence is missing."
+    }
+  ],
+  "securityInvariants": [
+    {
+      "id": "agent.security.auth",
+      "statement": "Production requires authenticated durable sessions, secure cookies, no demo bypass, and a 32-character-or-longer session secret."
+    },
+    {
+      "id": "agent.security.tenancy",
+      "statement": "Minimal operator authentication is not role authorization or tenant isolation; never document v0.2 as public multi-tenant."
+    },
+    {
+      "id": "agent.security.csrf",
+      "statement": "Unsafe browser/API mutations require same-origin, CSRF, and a stable idempotency key; HTTP input cannot choose system actor type."
+    },
+    {
+      "id": "agent.security.ssrf",
+      "statement": "Every fetch redirect and DNS result remains subject to public-address, byte, time, and media-type policy."
+    },
+    {
+      "id": "agent.security.documents",
+      "statement": "Uploads stay quarantined until a clean scan; production scanner error is fail-closed and mock/bypass is not production evidence."
+    },
+    {
+      "id": "agent.security.storage",
+      "statement": "Object keys and local paths remain contained, reads/writes are bounded, and relevant bytes are size/hash verified."
+    },
+    {
+      "id": "agent.security.model-content",
+      "statement": "Fetched, uploaded, and model-produced content is untrusted; prompt-injection flags are review signals, not proof of safety."
+    },
+    {
+      "id": "agent.security.qa",
+      "statement": "Only RESOLVED clears a blocker; ACCEPTED_RISK cannot bypass blocker-gated approval or delivery."
+    },
+    {
+      "id": "agent.security.secrets",
+      "statement": "Never add real credentials, customer data, private URLs, provider responses, or generated delivery artifacts to fixtures/source control."
+    }
+  ],
+  "completionEvidence": [
+    {
+      "id": "agent.evidence.focused",
+      "statement": "Run the narrow test lane that directly exercises the requested behavior."
+    },
+    {
+      "id": "agent.evidence.static",
+      "statement": "Run typecheck, lint, and build when the changed surface can affect them."
+    },
+    {
+      "id": "agent.evidence.browser",
+      "statement": "Run Playwright for UI navigation, state, persistence, mobile, accessibility-control, or auth behavior."
+    },
+    {
+      "id": "agent.evidence.artifact",
+      "statement": "Parse and inspect generated PDF, DOCX, CSV, or ZIP outputs when export behavior changes."
+    },
+    {
+      "id": "agent.evidence.docs",
+      "statement": "Run strict management/link/path validation after documentation or metadata changes."
+    },
+    {
+      "id": "agent.evidence.report",
+      "statement": "Report commands actually run, exact failures/skips, unverified boundaries, and relevant risks."
+    }
+  ],
+  "commands": [
+    {
+      "id": "agent.command.docs",
+      "command": "npm run docs:validate",
+      "purpose": "Validate management JSON, declared repository references, and local Markdown links."
+    },
+    {
+      "id": "agent.command.unit",
+      "command": "npm run test:unit",
+      "purpose": "Run the pure/focused unit lane."
+    },
+    {
+      "id": "agent.command.integration",
+      "command": "npm run test:integration",
+      "purpose": "Run the PostgreSQL-backed integration lane."
+    },
+    {
+      "id": "agent.command.e2e",
+      "command": "npm run test:e2e",
+      "purpose": "Run authenticated desktop/mobile/auth browser behavior."
+    },
+    {
+      "id": "agent.command.verify",
+      "command": "npm run verify",
+      "purpose": "Run lint, typecheck, full Vitest, and build; Playwright remains separate."
+    }
+  ]
+}

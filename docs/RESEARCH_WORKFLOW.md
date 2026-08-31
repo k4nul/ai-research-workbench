@@ -16,7 +16,7 @@ Intake
   -> export and delivery
 ```
 
-The route handlers expose the workflow as JSON APIs. Browser pages cover dashboard, project intake/list/overview, scope, plan, source acquisition/detail/evidence, claim/evidence ledger, findings, report/revisions, QA, approval/export, audit, and read-only provider settings.
+The route handlers expose the workflow as authenticated JSON APIs. Browser pages cover dashboard, project intake/list/overview, scope, plan, source acquisition/detail/evidence, claim/evidence ledger, findings, report/revisions, QA, approval/export, audit, sessions, jobs, runs, documents, evaluations, and operations/provider state.
 
 ## 1. Intake and scope
 
@@ -31,7 +31,7 @@ Relevant routes:
 - `GET/PATCH/DELETE /api/projects/:projectId`
 - `POST /api/projects/:projectId/scope`
 
-Project deletion removes the database graph first, records a global deletion audit event, and then removes that project's private upload/export directories. A file-cleanup failure is reported after the database deletion and recorded as a global storage-cleanup failure. There is no restore without a database and file backup.
+Project deletion removes the database graph, records a global deletion audit event, and reconciles project-owned private storage. Database and object cleanup can fail at different boundaries, so inspect the returned cleanup report/audit. There is no restore without matching database and object-storage backups.
 
 ## 2. Questions and research plan
 
@@ -50,6 +50,8 @@ Questions can be added and updated through:
 - `POST /api/projects/:projectId/questions`
 - `PATCH /api/projects/:projectId/questions/:questionId`
 
+After plan approval, `POST /api/runs` creates an idempotent orchestrated run with frozen scope/plan revisions, provider/model configuration, budget, and pipeline version. The worker sequences all eleven stages and persists versioned generations. A successful final stage stops at `APPROVAL_REQUIRED`; explicit human project approval completes the latest waiting run and records a separate run audit event. Pipeline execution never replaces plan approval, deterministic QA, or final human approval. See [AI pipeline](AI_PIPELINE.md) and [Operations](OPERATIONS.md).
+
 ## 3. Sources and evidence
 
 A source record captures URL or upload provenance, title, publisher, author, dates, type, language, availability, reliability, freshness, duplicate and reuse links, content hash, restrictions, ingestion method, media type, summary, sanitized content, prompt-injection flag, and fetch metadata.
@@ -64,7 +66,7 @@ The implemented source APIs support structured source creation, listing, detail,
 - `POST /api/projects/:projectId/sources/import`
 - `GET /api/sources/:sourceId`
 
-Search registers normalized result metadata and snippets; it does not automatically fetch or verify each page. Fetch separately applies DNS/IP/redirect/time/byte/media-type controls and stores sanitized text plus hop metadata. Upload validates and stores permitted bytes in a private project directory; text/HTML/JSON can be normalized, while PDF/DOCX remain binary sources requiring manual evidence or a future extraction adapter. Imports accept bounded JSON source arrays or one Markdown source. None of these paths performs malware scanning.
+Search registers normalized result metadata and snippets; it does not automatically fetch or verify each page. Fetch separately applies DNS/IP/redirect/time/byte/media-type controls and stores sanitized text plus hop metadata. Structured JSON/Markdown text import is validated as one atomic batch. File uploads through either `POST /api/projects/:projectId/sources/upload` or `POST /api/projects/:projectId/documents` quarantine PDF, DOCX, TXT, HTML, Markdown, CSV, or JSON in private object storage, submit ClamAV scanning, and then run bounded extraction/chunk/anchor work. Extraction requires a clean scan except for the explicit audited non-production demo bypass. See [Document pipeline](DOCUMENT_PIPELINE.md).
 
 Evidence is attached to a source through `POST /api/sources/:sourceId/evidence`. Each record stores a concise summary, optional minimal quote, original location/page, confidence, verification state, and `FULL` or `PARTIAL` support extent. The system relies on a human or a trusted upstream process to mark evidence verified; provider output does not self-verify.
 
@@ -124,11 +126,11 @@ Approval is a three-action state machine on `POST /api/projects/:projectId/appro
 2. `approve` requires a pending request and `confirmation: true`, then records the approval timestamp and approves the current deliverable.
 3. `deliver` requires approval and a generated ZIP, then records delivery.
 
-These are local workflow actions. There is no authenticated approver identity, signature, email, or external notification. Audit labels indicate the local actor type, not proof of identity.
+These are authenticated named-operator actions, but v0.2 has no separate approver permission, cryptographic signature, email, or external notification. The audit actor comes from the durable session; its label/history is not a digital signature or tenant authorization.
 
 ## 8. Exports and delivery
 
-`GET /api/projects/:projectId/exports/:format` generates `markdown`, `html`, `pdf`, `docx`, `csv`, or `zip`; `?persist=true` writes an artifact under the configured private storage directory and records its hash and size. The approval page presents the project's requested review formats plus ZIP. ZIP is always required, persisted, and approval-gated. Material research/report changes mark every earlier export non-current; delivery requires a newly generated current ZIP.
+`GET /api/projects/:projectId/exports/:format` generates `markdown`, `html`, `pdf`, `docx`, `csv`, or `zip` synchronously without persistence; legacy `?persist` requests are rejected. To persist an export, an authenticated client sends a centrally receipted `POST` with an `Idempotency-Key`, which freezes the current snapshot and queues a `GENERATE_EXPORT` job. A separately running worker persists that snapshot through configured local/S3 object storage with lease/attempt fencing, records its input hash, byte hash/size, persistence state, and object reference, and reuses the verified job/artifact when the request is replayed. The approval page submits that mutation before offering the read-only download. It presents the project's requested review formats plus ZIP. ZIP generation is approval-gated, and final delivery requires a current persisted ZIP. Material research/report changes mark every earlier export non-current; delivery requires a newly generated current ZIP.
 
 Non-ZIP files can support review before approval. They must not be represented as final approved delivery. See [Export formats](EXPORT_FORMATS.md).
 
@@ -149,4 +151,4 @@ Each gate is worth one eighth. The persisted `progress` value is refreshed after
 
 ## Audit trail
 
-State-changing services write an event with actor type/label, action, resource, optional before state, optional after state, and timestamp. `GET /api/audit` supports read access to audit records. Audit events are useful provenance but are mutable database records in a single-user local system, not tamper-evident compliance logs.
+State-changing services write an event with principal-derived or bounded system actor type/label, action, resource, optional before state, optional after state, and timestamp. `GET /api/audit` supports authenticated read access. Audit events are useful provenance but are mutable database records in one shared installation, not tamper-evident compliance logs.
