@@ -1,23 +1,48 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { promisify } from "node:util";
 
-import { expect as baseExpect, test, type Download, type Page } from "@playwright/test";
+import {
+  expect as baseExpect,
+  test,
+  type Download,
+  type Page,
+  type Response
+} from "@playwright/test";
 import JSZip from "jszip";
 import { PDFDocument } from "pdf-lib";
 
-test.use({ baseURL: process.env.APP_URL ?? "http://localhost:3100" });
+import { gotoApp, reloadApp } from "./helpers/app-ready";
+
+test.use({ baseURL: process.env.APP_URL ?? "https://127.0.0.1:3100" });
 const expect = baseExpect.configure({ timeout: 60_000 });
+const execFileAsync = promisify(execFile);
+const exportWorkerHelper = path.join(process.cwd(), "e2e", "helpers", "export-worker.ts");
+const mutationTimeoutMs = 60_000;
 let createdProjectId: string | undefined;
 
 test.beforeEach(() => {
   createdProjectId = undefined;
 });
 
-test.afterEach(async ({ request }) => {
+test.afterEach(async ({ page }) => {
   if (!createdProjectId) {
     return;
   }
-  const response = await request.delete(
+  const csrf = (await page.context().cookies()).find((cookie) => cookie.name === "arw_csrf");
+  if (!csrf) {
+    throw new Error("The authenticated workflow fixture has no CSRF cookie.");
+  }
+  const response = await page.request.delete(
     `/api/projects/${encodeURIComponent(createdProjectId)}`,
+    {
+      headers: {
+        origin: process.env.APP_URL ?? "https://127.0.0.1:3100",
+        "x-csrf-token": csrf.value,
+        "idempotency-key": `e2e-project-cleanup:${createdProjectId}`
+      }
+    }
   );
   expect(response.status()).toBe(200);
   createdProjectId = undefined;
@@ -40,6 +65,57 @@ function projectNavigation(page: Page) {
   return page.getByRole("navigation", { name: "Project sections" });
 }
 
+async function performMutation(
+  page: Page,
+  method: "POST" | "PUT" | "PATCH",
+  pathname: string,
+  status: number,
+  trigger: () => Promise<unknown>
+): Promise<Response> {
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (candidate) =>
+        candidate.request().method() === method &&
+        new URL(candidate.url()).pathname === pathname,
+      { timeout: mutationTimeoutMs }
+    ),
+    trigger()
+  ]);
+  expect(response.status(), `${method} ${pathname}`).toBe(status);
+  return response;
+}
+
+async function responseResourceId(response: Response, resource: string): Promise<string> {
+  const payload = (await response.json()) as { data?: { id?: unknown } };
+  const id = payload.data?.id;
+  if (typeof id !== "string" || !id) {
+    throw new Error(`The ${resource} response did not contain an ID.`);
+  }
+  return id;
+}
+
+async function responseExportJobId(response: Response): Promise<string> {
+  expect(response.status()).toBe(202);
+  const payload = (await response.json()) as {
+    data?: { job?: { id?: unknown }; queued?: unknown };
+  };
+  expect(payload.data?.queued).toBe(true);
+  const jobId = payload.data?.job?.id;
+  if (typeof jobId !== "string" || !jobId) {
+    throw new Error("The export submission response did not contain a job ID.");
+  }
+  return jobId;
+}
+
+async function runExportWorker(jobId: string): Promise<void> {
+  await execFileAsync(process.execPath, ["--import", "tsx", exportWorkerHelper, jobId], {
+    cwd: process.cwd(),
+    env: process.env,
+    timeout: 120_000,
+    maxBuffer: 10 * 1024 * 1024
+  });
+}
+
 test("completes an evidence-backed project through approval and valid exports", async ({ page }) => {
   test.setTimeout(600_000);
 
@@ -52,11 +128,12 @@ test("completes an evidence-backed project through approval and valid exports", 
   const findingText = "Traceable evidence makes the review decision easier to audit.";
   const reportTitle = `Evidence workflow report ${runId}`;
   const researchQuestion = `What evidence validates the traceable workflow ${runId}?`;
+  let questionId = "";
   let sourceId = "";
   let researchDate = "";
 
   await test.step("create a uniquely named project", async () => {
-    await page.goto("/projects/new");
+    await gotoApp(page, "/projects/new");
     await expect(page.getByRole("heading", { level: 1, name: "Create project" })).toBeVisible();
 
     await page.getByLabel("Project name").fill(projectName);
@@ -71,14 +148,18 @@ test("completes an evidence-backed project through approval and valid exports", 
     await page.getByLabel("Maximum source age (days)").fill("7300");
     researchDate = await page.getByLabel("Research as-of date").inputValue();
 
-    await page.getByRole("button", { name: "Create project" }).click();
+    const createResponse = await performMutation(
+      page,
+      "POST",
+      "/api/projects",
+      201,
+      () => page.getByRole("button", { name: "Create project" }).click()
+    );
+    createdProjectId = await responseResourceId(createResponse, "project creation");
 
-    await expect(page).toHaveURL(/\/projects\/(?!new(?:[/?#]|$))[A-Za-z0-9-]+$/);
-    const projectMatch = new URL(page.url()).pathname.match(/^\/projects\/([^/]+)$/);
-    if (!projectMatch) {
-      throw new Error(`Could not determine a project ID from UI URL ${page.url()}.`);
-    }
-    createdProjectId = decodeURIComponent(projectMatch[1]);
+    await expect(page).toHaveURL(
+      new RegExp(`/projects/${encodeURIComponent(createdProjectId)}$`)
+    );
     await expect(page.getByRole("heading", { level: 1, name: "Project overview" })).toBeVisible();
     await expect(page.getByText(projectName, { exact: true })).toBeVisible();
   });
@@ -90,7 +171,13 @@ test("completes an evidence-backed project through approval and valid exports", 
     await page
       .getByLabel("Exclusions")
       .fill("Real customer data, production deployment, and external delivery are excluded.");
-    await page.getByRole("button", { name: "Save scope" }).click();
+    await performMutation(
+      page,
+      "PATCH",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}`,
+      200,
+      () => page.getByRole("button", { name: "Save scope" }).click()
+    );
     await expect(
       page.getByText(
         "Scope saved. Any prior scope, plan, QA, and approval confirmations were reset for review.",
@@ -98,7 +185,13 @@ test("completes an evidence-backed project through approval and valid exports", 
       ),
     ).toBeVisible();
 
-    await page.getByRole("button", { name: "Approve scope" }).click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/scope`,
+      200,
+      () => page.getByRole("button", { name: "Approve scope" }).click()
+    );
     await expect(page.getByText("Scope approved. Planning is now available.", { exact: true })).toBeVisible();
     await expect(page.getByText("Planning", { exact: true }).first()).toBeVisible();
   });
@@ -111,10 +204,23 @@ test("completes an evidence-backed project through approval and valid exports", 
     await page
       .getByLabel("Completion criteria")
       .fill("Verified evidence is linked to a supported claim and finding.");
-    await page.getByRole("button", { name: "Add question" }).click();
+    const questionResponse = await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/questions`,
+      201,
+      () => page.getByRole("button", { name: "Add question" }).click()
+    );
+    questionId = await responseResourceId(questionResponse, "question creation");
     await expect(page.getByText("Research question added.", { exact: true })).toBeVisible();
 
-    await page.getByRole("button", { name: "Generate starter plan" }).click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/plan`,
+      200,
+      () => page.getByRole("button", { name: "Generate starter plan" }).click()
+    );
     await expect(page.getByText("Starter questions and plans generated.", { exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { level: 3, name: researchQuestion })).toBeVisible();
 
@@ -130,10 +236,22 @@ test("completes an evidence-backed project through approval and valid exports", 
     await firstPlan
       .getByLabel("Search strategy")
       .fill("Review authoritative primary material and compare independent corroboration.");
-    await firstPlan.getByRole("button", { name: "Save plan" }).click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/plan`,
+      200,
+      () => firstPlan.getByRole("button", { name: "Save plan" }).click()
+    );
     await expect(firstPlan.getByText("Plan saved and returned to human review.", { exact: true })).toBeVisible();
 
-    await page.getByRole("button", { name: "Approve all plans" }).click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/plan`,
+      200,
+      () => page.getByRole("button", { name: "Approve all plans" }).click()
+    );
     await expect(page.getByText("All current plan items approved.", { exact: true })).toBeVisible();
     await expect(page.getByText("Researching", { exact: true }).first()).toBeVisible();
 
@@ -142,7 +260,13 @@ test("completes an evidence-backed project through approval and valid exports", 
       .filter({ has: page.getByRole("heading", { level: 3, name: researchQuestion }) });
     await questionCard.getByRole("combobox", { exact: true, name: "Status" }).selectOption("COMPLETE");
     await questionCard.getByRole("combobox", { exact: true, name: "Gap status" }).selectOption("NONE");
-    await questionCard.getByRole("button", { name: "Update" }).click();
+    await performMutation(
+      page,
+      "PATCH",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/questions/${encodeURIComponent(questionId)}`,
+      200,
+      () => questionCard.getByRole("button", { name: "Update" }).click()
+    );
     await expect(questionCard.getByText("Question state updated.", { exact: true })).toBeVisible();
     await expect(questionCard.getByRole("combobox", { exact: true, name: "Status" })).toHaveValue(
       "COMPLETE",
@@ -159,19 +283,24 @@ test("completes an evidence-backed project through approval and valid exports", 
     await page.getByLabel("Published date").fill(researchDate);
     await page.getByLabel("Reliability grade").selectOption("A");
     await page.getByLabel("Content summary").fill(sourceSummary);
-    await page.getByRole("button", { name: "Add source" }).click();
+    const sourceResponse = await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/sources`,
+      201,
+      () => page.getByRole("button", { name: "Add source" }).click()
+    );
+    sourceId = await responseResourceId(sourceResponse, "source creation");
 
     await expect(page.getByText("Source added to this project.", { exact: true })).toBeVisible();
     const sourceLink = page
       .getByRole("table", { name: "Project sources" })
       .getByRole("link", { exact: true, name: sourceTitle });
     await expect(sourceLink).toBeVisible();
-    const sourceHref = await sourceLink.getAttribute("href");
-    const sourceMatch = sourceHref?.match(/\/sources\/([^/?#]+)$/);
-    if (!sourceMatch) {
-      throw new Error(`Could not determine a source ID from UI link ${String(sourceHref)}.`);
-    }
-    sourceId = decodeURIComponent(sourceMatch[1]);
+    await expect(sourceLink).toHaveAttribute(
+      "href",
+      `/projects/${encodeURIComponent(createdProjectId!)}/sources/${encodeURIComponent(sourceId)}`
+    );
     await sourceLink.click();
 
     await expect(page.getByRole("heading", { level: 1, name: sourceTitle })).toBeVisible();
@@ -181,7 +310,13 @@ test("completes an evidence-backed project through approval and valid exports", 
     await page.getByLabel("Page or section").fill("Traceability controls");
     await page.getByLabel("Confidence").selectOption("HIGH");
     await page.getByLabel("Verification").selectOption("VERIFIED");
-    await page.getByRole("button", { name: "Add evidence" }).click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/sources/${encodeURIComponent(sourceId)}/evidence`,
+      201,
+      () => page.getByRole("button", { name: "Add evidence" }).click()
+    );
 
     await expect(page.getByText("Evidence excerpt added to the source.", { exact: true })).toBeVisible();
     await expect(
@@ -204,7 +339,13 @@ test("completes an evidence-backed project through approval and valid exports", 
       .getByRole("combobox", { exact: true, name: "Question" })
       .selectOption({ label: researchQuestion });
     await page.getByLabel("Importance").selectOption("MEDIUM");
-    await page.getByRole("button", { name: "Add claim" }).click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/claims`,
+      201,
+      () => page.getByRole("button", { name: "Add claim" }).click()
+    );
     await expect(
       page.getByText("Claim added. Link verified evidence before relying on it.", { exact: true }),
     ).toBeVisible();
@@ -219,13 +360,19 @@ test("completes an evidence-backed project through approval and valid exports", 
       .getByRole("combobox", { exact: true, name: "Evidence" })
       .selectOption({ label: `${sourceTitle}: ${evidenceSummary}` });
     await evidenceLinkForm.getByLabel("Relationship").selectOption("SUPPORTS");
-    await evidenceLinkForm.getByRole("button", { name: "Link evidence" }).click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/ledger`,
+      200,
+      () => evidenceLinkForm.getByRole("button", { name: "Link evidence" }).click()
+    );
     await expect(
       page.getByText("Evidence relationship saved and claim support recalculated.", { exact: true }),
     ).toBeVisible();
 
     // Settle the two consecutive server refreshes from claim creation and evidence linking.
-    await page.reload();
+    await reloadApp(page);
     await expect(
       page.getByRole("heading", { level: 1, name: "Claims & evidence ledger" }),
     ).toBeVisible();
@@ -250,7 +397,13 @@ test("completes an evidence-backed project through approval and valid exports", 
     await page.getByLabel("Limitations").fill("The test uses one bounded synthetic source.");
     await page.getByRole("checkbox", { name: new RegExp(claimText) }).check();
     await page.getByRole("checkbox", { name: "This finding may inform a recommendation" }).check();
-    await page.getByRole("button", { name: "Add finding" }).click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/findings`,
+      201,
+      () => page.getByRole("button", { name: "Add finding" }).click()
+    );
 
     await expect(
       page.getByText("Finding created with its selected claim links.", { exact: true }),
@@ -285,7 +438,13 @@ test("completes an evidence-backed project through approval and valid exports", 
       .getByLabel(/^Recommendations/)
       .fill("Retain explicit QA and human approval before final delivery.");
     await page.getByLabel(/^References/).fill(`[${sourceId}] ${sourceTitle}.`);
-    await page.getByRole("button", { name: "Save report" }).click();
+    await performMutation(
+      page,
+      "PUT",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/deliverable`,
+      200,
+      () => page.getByRole("button", { name: "Save report" }).click()
+    );
 
     await expect(page.getByText("Report saved and revision history updated.", { exact: true })).toBeVisible();
     await expect(page.getByRole("table", { name: "Report revision history" })).toContainText("User");
@@ -294,7 +453,13 @@ test("completes an evidence-backed project through approval and valid exports", 
   await test.step("run QA and record explicit human approval", async () => {
     await projectNavigation(page).getByRole("link", { exact: true, name: "QA" }).click();
     await expect(page.getByRole("heading", { level: 1, name: "Quality assurance" })).toBeVisible();
-    await page.getByRole("button", { name: "Run QA" }).click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/qa`,
+      200,
+      () => page.getByRole("button", { name: "Run QA" }).click()
+    );
 
     await expect(page.getByText("QA run completed and findings refreshed.", { exact: true })).toBeVisible();
     await expect(page.getByText("No unresolved blockers in the current finding set")).toBeVisible();
@@ -310,7 +475,13 @@ test("completes an evidence-backed project through approval and valid exports", 
 
     const requestButton = page.getByRole("button", { name: "Request approval" });
     await expect(requestButton).toBeEnabled();
-    await requestButton.click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/approval`,
+      200,
+      () => requestButton.click()
+    );
     await expect(page.getByText("Approval requested for human review.", { exact: true })).toBeVisible();
 
     const approveButton = page.getByRole("button", { name: "Approve project" });
@@ -321,14 +492,27 @@ test("completes an evidence-backed project through approval and valid exports", 
       })
       .check();
     await expect(approveButton).toBeEnabled();
-    await approveButton.click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/approval`,
+      200,
+      () => approveButton.click()
+    );
     await expect(page.getByText("Explicit human approval recorded.", { exact: true })).toBeVisible();
     await expect(page.getByText("Approved", { exact: true }).first()).toBeVisible();
   });
 
   await test.step("download and parse the PDF and final ZIP", async () => {
     const pdfEvent = page.waitForEvent("download");
-    await page.getByRole("link", { name: /^PDF\b/ }).click();
+    const pdfSubmission = await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/exports/pdf`,
+      202,
+      () => page.getByRole("link", { name: /^PDF\b/ }).click()
+    );
+    await responseExportJobId(pdfSubmission);
     const pdfDownload = await pdfEvent;
     expect(pdfDownload.suggestedFilename()).toBe("final-report.pdf");
     const pdfBytes = await readDownload(pdfDownload);
@@ -338,7 +522,14 @@ test("completes an evidence-backed project through approval and valid exports", 
     expect(pdf.getPageCount()).toBeGreaterThan(0);
 
     const zipEvent = page.waitForEvent("download");
-    await page.getByRole("link", { name: /^ZIP\b/ }).click();
+    const zipSubmission = await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/exports/zip`,
+      202,
+      () => page.getByRole("link", { name: /^ZIP\b/ }).click()
+    );
+    await responseExportJobId(zipSubmission);
     const zipDownload = await zipEvent;
     expect(zipDownload.suggestedFilename()).toBe("delivery-package.zip");
     const zipBytes = await readDownload(zipDownload);
@@ -371,7 +562,7 @@ test("completes an evidence-backed project through approval and valid exports", 
     expect(metadata.project?.name).toBe(projectName);
     expect(metadata.fixture).toBe(false);
 
-    await page.reload();
+    await reloadApp(page);
     await expect(page.getByRole("button", { name: "Mark delivered" })).toBeEnabled();
   });
 
@@ -381,7 +572,13 @@ test("completes an evidence-backed project through approval and valid exports", 
     await page
       .getByLabel(/^Executive summary/)
       .fill("The stored evidence supports the test claim; this edit requires fresh review.");
-    await page.getByRole("button", { name: "Save report" }).click();
+    await performMutation(
+      page,
+      "PUT",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/deliverable`,
+      200,
+      () => page.getByRole("button", { name: "Save report" }).click()
+    );
     await expect(page.getByText("Report saved and revision history updated.", { exact: true })).toBeVisible();
 
     await projectNavigation(page)
@@ -394,7 +591,13 @@ test("completes an evidence-backed project through approval and valid exports", 
     await expect(page.getByRole("button", { name: "Mark delivered" })).toBeDisabled();
 
     await projectNavigation(page).getByRole("link", { exact: true, name: "QA" }).click();
-    await page.getByRole("button", { name: "Run QA" }).click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/qa`,
+      200,
+      () => page.getByRole("button", { name: "Run QA" }).click()
+    );
     await expect(page.getByText("QA run completed and findings refreshed.", { exact: true })).toBeVisible();
     await expect(page.getByText("No unresolved blockers in the current finding set")).toBeVisible();
 
@@ -404,30 +607,82 @@ test("completes an evidence-backed project through approval and valid exports", 
     await expect(
       page.getByText("All workflow prerequisites are ready for human approval.", { exact: true }),
     ).toBeVisible();
-    await page.getByRole("button", { name: "Request approval" }).click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/approval`,
+      200,
+      () => page.getByRole("button", { name: "Request approval" }).click()
+    );
     await expect(page.getByText("Approval requested for human review.", { exact: true })).toBeVisible();
     await page
       .getByRole("checkbox", {
         name: "I reviewed the current report, evidence, limitations, and QA state and approve this project.",
       })
       .check();
-    await page.getByRole("button", { name: "Approve project" }).click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/approval`,
+      200,
+      () => page.getByRole("button", { name: "Approve project" }).click()
+    );
     await expect(page.getByText("Explicit human approval recorded.", { exact: true })).toBeVisible();
 
     const deliverButton = page.getByRole("button", { name: "Mark delivered" });
     await expect(deliverButton).toBeEnabled();
-    await deliverButton.click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/approval`,
+      409,
+      () => deliverButton.click()
+    );
     await expect(page.getByText("Generate the final ZIP before delivery.", { exact: true })).toBeVisible();
     await expect(page.getByText("Approved", { exact: true }).first()).toBeVisible();
 
     const freshZipEvent = page.waitForEvent("download");
-    await page.getByRole("link", { name: /^ZIP\b/ }).click();
-    const freshZip = await freshZipEvent;
+    let freshZipSubmissionCount = 0;
+    const countFreshZipSubmission = (request: { method(): string; url(): string }) => {
+      if (request.method() === "POST" && request.url().endsWith("/exports/zip")) {
+        freshZipSubmissionCount += 1;
+      }
+    };
+    const freshZipAction = page.locator(".export-action").filter({
+      has: page.getByRole("link", { name: /^ZIP\b/ })
+    });
+    const [freshZipSubmission, freshZip] = await (async () => {
+      page.on("request", countFreshZipSubmission);
+      try {
+        const submission = await performMutation(
+          page,
+          "POST",
+          `/api/projects/${encodeURIComponent(createdProjectId!)}/exports/zip`,
+          202,
+          () => freshZipAction.getByRole("link", { name: /^ZIP\b/ }).dblclick()
+        );
+        return [submission, await freshZipEvent] as const;
+      } finally {
+        page.off("request", countFreshZipSubmission);
+      }
+    })();
+    const exportJobId = await responseExportJobId(freshZipSubmission);
+    expect(freshZipSubmissionCount).toBe(1);
     expect(freshZip.suggestedFilename()).toBe("delivery-package.zip");
     const refreshedArchive = await JSZip.loadAsync(await readDownload(freshZip));
     expect(refreshedArchive.file("final-report.md")).not.toBeNull();
+    await expect(
+      freshZipAction.getByText("Export queued and download started.", { exact: true })
+    ).toBeVisible();
+    await runExportWorker(exportJobId);
 
-    await deliverButton.click();
+    await performMutation(
+      page,
+      "POST",
+      `/api/projects/${encodeURIComponent(createdProjectId!)}/approval`,
+      200,
+      () => deliverButton.click()
+    );
     await expect(page.getByText("Project marked delivered.", { exact: true })).toBeVisible();
     await expect(page.getByText("Delivered", { exact: true }).first()).toBeVisible();
   });

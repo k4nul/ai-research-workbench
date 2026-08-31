@@ -1,13 +1,15 @@
 import { expect, test } from "@playwright/test";
 
+import { gotoApp } from "./helpers/app-ready";
+
 const sampleProjectName = "[SAMPLE] Research workbench adoption feasibility";
 
-test.use({ baseURL: process.env.APP_URL ?? "http://localhost:3100" });
+test.use({ baseURL: process.env.APP_URL ?? "https://127.0.0.1:3100" });
 
 test("navigates from the dashboard to the seeded demo project", async ({ page }) => {
   test.setTimeout(90_000);
 
-  await page.goto("/");
+  await gotoApp(page, "/");
 
   await expect(page.getByRole("heading", { level: 1, name: "Dashboard" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Workspace metrics" })).toBeVisible();
