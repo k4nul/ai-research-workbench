@@ -1,0 +1,62 @@
+name: optional-live-provider-canary
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: Optional live provider canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: research_workbench
+          POSTGRES_USER: research
+          POSTGRES_PASSWORD: research
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U research -d research_workbench"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgresql://research:research@localhost:5432/research_workbench
+      DEMO_MODE: "false"
+      APP_URL: http://127.0.0.1:3100
+      AUTH_ENABLED: "true"
+      AUTH_SESSION_SECRET: ci-test-session-secret-not-for-production
+      AUTH_COOKIE_SECURE: "true"
+      MALWARE_SCANNER_PROVIDER: mock
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5-mini' }}
+      BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+          cache: npm
+      - run: npm ci
+      - run: npm run migrate
+      - name: Run bounded synthetic canary
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p .artifacts/canary
+          npm --silent run test:providers:live | tee .artifacts/canary/result.json
+          node -e "JSON.parse(require('node:fs').readFileSync('.artifacts/canary/result.json', 'utf8'))"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: provider-canary-result
+          path: .artifacts/canary/result.json
+          if-no-files-found: error
+          retention-days: 14

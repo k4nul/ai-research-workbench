@@ -8,10 +8,30 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DATABASE_URL: postgresql://research:research@localhost:5432/research_workbench
+  TEST_DATABASE_URL: postgresql://research:research@localhost:5432/research_workbench_test
+  DEMO_MODE: "true"
+  APP_URL: http://127.0.0.1:3100
+  STORAGE_DIR: ./.data
+  AUTH_ENABLED: "true"
+  AUTH_SESSION_SECRET: ci-test-session-secret-not-for-production
+  AUTH_COOKIE_SECURE: "true"
+  AUTH_DEMO_BYPASS: "false"
+  MALWARE_SCANNER_PROVIDER: mock
+  MALWARE_REQUIRED: "true"
+  MALWARE_ALLOW_DEMO_BYPASS: "false"
+  CI: "true"
+
 jobs:
-  verify:
+  quality:
+    name: Quality
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:17-alpine
@@ -25,34 +45,239 @@ jobs:
           --health-cmd "pg_isready -U research -d research_workbench"
           --health-interval 2s
           --health-timeout 3s
-          --health-retries 20
-    env:
-      DATABASE_URL: postgresql://research:research@localhost:5432/research_workbench
-      TEST_DATABASE_URL: postgresql://research:research@localhost:5432/research_workbench_test
-      DEMO_MODE: "true"
-      APP_URL: http://127.0.0.1:3100
-      STORAGE_DIR: ./.data
-      CI: "true"
+          --health-retries 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 22
+          node-version: 22.22.2
           cache: npm
       - run: npm ci
-      - run: npm run db:migrate
+      - run: npm run migrate
+      - run: npm run migrate
       - run: npm run seed
       - run: npm run lint
       - run: npm run typecheck
-      - run: npm test
+      - run: npm run docs:validate
+      - run: npm run test:unit
       - run: npm run build
+      - run: npm run validate:secrets
+      - run: npm audit --omit=dev
+
+  database-integration:
+    name: Database integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: research_workbench
+          POSTGRES_USER: research
+          POSTGRES_PASSWORD: research
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U research -d research_workbench"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+          cache: npm
+      - run: npm ci
+      - run: npm run test:integration
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: database-integration-diagnostics
+          path: test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  document-security:
+    name: Document security
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: research_workbench
+          POSTGRES_USER: research
+          POSTGRES_PASSWORD: research
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U research -d research_workbench"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      STORAGE_PROVIDER: s3
+      S3_ENDPOINT: http://127.0.0.1:59000
+      S3_REGION: us-east-1
+      S3_BUCKET: research-workbench
+      S3_ACCESS_KEY_ID: research-minio
+      S3_SECRET_ACCESS_KEY: local-minio-password-change-me
+      S3_FORCE_PATH_STYLE: "true"
+      MALWARE_SCANNER_PROVIDER: clamav
+      CLAMAV_HOST: 127.0.0.1
+      CLAMAV_PORT: "53310"
+      REQUIRE_S3_TEST: "true"
+      REQUIRE_CLAMAV_TEST: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+          cache: npm
+      - run: npm ci
+      - name: Start object storage and scanner
+        run: docker compose up -d --wait --wait-timeout 300 object-storage object-storage-init scanner
+      - run: npm run test:prepare
+      - run: npm run test:documents
+      - name: Service diagnostics
+        if: failure()
+        run: docker compose logs --no-color object-storage object-storage-init scanner > service-diagnostics.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: document-security-diagnostics
+          path: service-diagnostics.log
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Clean up services
+        if: always()
+        run: docker compose down --volumes --remove-orphans
+
+  provider-contracts:
+    name: Provider contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+          cache: npm
+      - run: npm ci
+      - run: npm run test:providers
+
+  evaluation:
+    name: Deterministic evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: research_workbench
+          POSTGRES_USER: research
+          POSTGRES_PASSWORD: research
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U research -d research_workbench"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+          cache: npm
+      - run: npm ci
+      - run: npm run migrate
+      - run: npm run eval:mock
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mock-evaluation
+          path: .artifacts/evals/mock
+          retention-days: 14
+
+  e2e:
+    name: Browser E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      APP_URL: https://127.0.0.1:3100
+      AUTH_COOKIE_SECURE: "true"
+      DATABASE_URL: postgresql://research:research@localhost:5432/research_workbench_test
+      TEST_DATABASE_URL: postgresql://research:research@localhost:5432/research_workbench_test
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: research_workbench_test
+          POSTGRES_USER: research
+          POSTGRES_PASSWORD: research
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U research -d research_workbench_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+          cache: npm
+      - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()
         with:
           name: playwright-artifacts
           path: |
             playwright-report
             test-results
+          if-no-files-found: ignore
           retention-days: 7
+
+  container:
+    name: Production container
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate Compose
+        run: docker compose config --quiet
+      - name: Build immutable web/worker image
+        run: docker compose build web worker migrate
+      - name: Verify non-root runtime
+        run: test "$(docker run --rm --entrypoint id ai-research-workbench:v0.2.0-local -u)" = "1001"
+      - name: Verify production-only dependencies
+        run: docker run --rm --entrypoint sh ai-research-workbench:v0.2.0-local -c 'test ! -d node_modules/@playwright/test && test ! -d node_modules/playwright && test ! -d node_modules/playwright-core && test ! -e node_modules/.bin/playwright && test ! -d node_modules/vitest && test -d node_modules/dotenv'
+      - name: Verify non-Latin PDF rendering
+        run: docker run --rm --entrypoint ./node_modules/.bin/tsx ai-research-workbench:v0.2.0-local scripts/smoke-pdf-font.ts
+      - name: Start full environment
+        run: docker compose up -d --wait --wait-timeout 300
+      - name: Verify service health
+        run: docker compose ps
+      - name: Verify worker readiness
+        run: docker compose exec -T worker ./node_modules/.bin/tsx scripts/worker-readiness.ts
+      - name: Seed synthetic fixture
+        run: docker compose exec -T web ./node_modules/.bin/tsx scripts/seed.ts
+      - name: Execute full 11-stage mock research run
+        run: docker compose exec -T web ./node_modules/.bin/tsx scripts/smoke-research-run.ts
+      - name: Container diagnostics
+        if: failure()
+        run: docker compose logs --no-color > container-diagnostics.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: container-diagnostics
+          path: container-diagnostics.log
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Clean up containers
+        if: always()
+        run: docker compose down --volumes --remove-orphans

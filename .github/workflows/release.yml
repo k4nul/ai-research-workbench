@@ -1,0 +1,156 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v0.2.0"
+
+permissions:
+  contents: read
+
+env:
+  DATABASE_URL: postgresql://research:research@localhost:5432/research_workbench
+  TEST_DATABASE_URL: postgresql://research:research@localhost:5432/research_workbench_test
+  DEMO_MODE: "true"
+  APP_URL: http://127.0.0.1:3100
+  STORAGE_PROVIDER: local
+  STORAGE_DIR: ./.data
+  AUTH_ENABLED: "true"
+  AUTH_SESSION_SECRET: release-fixture-session-secret-not-for-production
+  AUTH_COOKIE_SECURE: "false"
+  AUTH_DEMO_BYPASS: "false"
+  MALWARE_SCANNER_PROVIDER: mock
+  MALWARE_REQUIRED: "true"
+  MALWARE_ALLOW_DEMO_BYPASS: "false"
+
+jobs:
+  required-main-ci:
+    name: Require exact-commit main CI
+    if: github.ref_name == 'v0.2.0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require tag to remain on the workflow commit
+        run: |
+          verification_ref="refs/release-verification/$GITHUB_REF_NAME"
+          git fetch --quiet --no-tags --force origin \
+            "refs/tags/$GITHUB_REF_NAME:$verification_ref"
+          test "$(git rev-parse "$verification_ref^{commit}")" = "$GITHUB_SHA"
+      - name: Require tag commit on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Require every mandatory CI job on the exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --event push \
+            --limit 20 --json databaseId,conclusion,headSha \
+            --jq '[.[] | select(.headSha == env.GITHUB_SHA and .conclusion == "success")][0].databaseId')"
+          test -n "$run_id"
+          gh run view "$run_id" --json jobs > required-ci-jobs.json
+          for required in \
+            "Quality" \
+            "Database integration" \
+            "Document security" \
+            "Provider contracts" \
+            "Deterministic evaluation" \
+            "Browser E2E" \
+            "Production container"
+          do
+            conclusion="$(jq -r --arg name "$required" \
+              '.jobs[] | select(.name == $name) | .conclusion' required-ci-jobs.json)"
+            test "$conclusion" = "success"
+          done
+
+  publish:
+    name: Validate and publish release
+    if: github.ref_name == 'v0.2.0'
+    needs: required-main-ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      attestations: read
+      contents: write
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: research_workbench
+          POSTGRES_USER: research
+          POSTGRES_PASSWORD: research
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U research -d research_workbench"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refuse to overwrite an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+          cache: npm
+      - run: npm ci
+      - run: npm run migrate
+      - run: npm run migrate
+      - run: npm run seed
+      - run: npm run verify
+      - run: npm run eval:mock
+      - name: Prepare unapproved synthetic release-preview assets
+        run: npm run release:prepare
+      - run: npm run release:verify
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          verification_ref="refs/release-verification/$GITHUB_REF_NAME"
+          git fetch --quiet --no-tags --force origin \
+            "refs/tags/$GITHUB_REF_NAME:$verification_ref"
+          test "$(git rev-parse "$verification_ref^{commit}")" = "$GITHUB_SHA"
+          gh release create "$GITHUB_REF_NAME" .artifacts/release/"$GITHUB_REF_NAME"/* \
+            --verify-tag --draft --title "AI Research Workbench $GITHUB_REF_NAME" \
+            --notes-file .artifacts/release/"$GITHUB_REF_NAME"/CHANGELOG.md
+      - name: Redownload and verify draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          download_dir="$(mktemp -d)"
+          gh release download "$GITHUB_REF_NAME" --dir "$download_dir"
+          npm run release:verify -- "$download_dir"
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          verification_ref="refs/release-verification/$GITHUB_REF_NAME"
+          git fetch --quiet --no-tags --force origin \
+            "refs/tags/$GITHUB_REF_NAME:$verification_ref"
+          test "$(git rev-parse "$verification_ref^{commit}")" = "$GITHUB_SHA"
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+      - name: Verify immutable release attestation and assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release verify "$GITHUB_REF_NAME"
+          for asset in .artifacts/release/"$GITHUB_REF_NAME"/*; do
+            gh release verify-asset "$GITHUB_REF_NAME" "$asset"
+          done
