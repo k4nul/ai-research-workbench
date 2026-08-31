@@ -59,6 +59,7 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run docs:validate
+      - run: npm run test:prepare
       - run: npm run test:unit
       - run: npm run build
       - run: npm run validate:secrets
@@ -137,7 +138,9 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Start object storage and scanner
-        run: docker compose up -d --wait --wait-timeout 300 object-storage object-storage-init scanner
+        run: |
+          docker compose up -d --wait --wait-timeout 300 object-storage scanner
+          docker compose run --rm object-storage-init
       - run: npm run test:prepare
       - run: npm run test:documents
       - name: Service diagnostics
