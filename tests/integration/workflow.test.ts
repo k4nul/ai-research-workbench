@@ -34,6 +34,8 @@ import {
 } from "@/lib/services/reports";
 import { resolveQaFinding, runProjectQa } from "@/lib/services/qa";
 import { runApprovalAction } from "@/lib/services/approval";
+import { createResearchRun } from "@/lib/services/research-runs";
+import { getJob, type JobRow } from "@/lib/services/jobs";
 import {
   generateArtifact,
   loadExportData,
@@ -41,6 +43,9 @@ import {
 } from "@/lib/export/generate";
 import { runPersistedAiStage } from "@/lib/services/provider-runs";
 import { getConfig, resetConfigForTests } from "@/lib/config";
+import { createDocumentRuntime } from "@/lib/documents";
+import { DurableWorker } from "@/worker/durable-worker";
+import { createDocumentJobHandlers } from "@/worker/document-handlers";
 import { PATCH as patchClaimReview } from "@/app/api/projects/[projectId]/claims/[claimId]/route";
 import { POST as postLedger } from "@/app/api/projects/[projectId]/ledger/route";
 
@@ -161,21 +166,104 @@ describe("database and research workflow", () => {
     }
   });
 
-  it("deletes project database rows and private upload/export files", async () => {
+  it("queues and completes durable cleanup for deleted projects and private legacy files", async () => {
     const project = await createProject(intake("Deletion integration"));
     const storageRoot = path.resolve(getConfig().storageDir);
     const uploadDirectory = path.join(storageRoot, "uploads", project.id);
     const exportDirectory = path.join(storageRoot, "exports", project.id);
+    const uploadFile = path.join(uploadDirectory, "fixture.txt");
+    const exportFile = path.join(exportDirectory, "fixture.zip");
+    const uploadObjectId = `legacy-upload-${project.id}`;
+    const exportObjectId = `legacy-export-${project.id}`;
     await mkdir(uploadDirectory, { recursive: true });
     await mkdir(exportDirectory, { recursive: true });
-    await writeFile(path.join(uploadDirectory, "fixture.txt"), "private fixture");
-    await writeFile(path.join(exportDirectory, "fixture.zip"), "private fixture");
+    await writeFile(uploadFile, "private fixture");
+    await writeFile(exportFile, "private fixture");
+    await query(
+      `INSERT INTO storage_objects (
+         id, provider, bucket, object_key, content_type, upload_status,
+         retention_status, project_id, legacy_storage_path
+       ) VALUES
+         ($1, 'LOCAL', 'private', $2, 'text/plain', 'AVAILABLE', 'ACTIVE', $3, $4),
+         ($5, 'LOCAL', 'private', $6, 'application/zip', 'AVAILABLE', 'ACTIVE', $3, $7)`,
+      [
+        uploadObjectId,
+        `legacy/uploads/${project.id}/fixture.txt`,
+        project.id,
+        uploadFile,
+        exportObjectId,
+        `legacy/exports/${project.id}/fixture.zip`,
+        exportFile
+      ]
+    );
 
-    await deleteProject(project.id);
+    const deletion = await deleteProject(project.id);
 
+    expect(deletion).toEqual({
+      cleanupJobId: expect.any(String),
+      objectCount: 2
+    });
     expect((await query("SELECT id FROM research_projects WHERE id = $1", [project.id])).rowCount).toBe(0);
-    await expect(access(uploadDirectory)).rejects.toBeTruthy();
-    await expect(access(exportDirectory)).rejects.toBeTruthy();
+    await expect(access(uploadFile)).resolves.toBeUndefined();
+    await expect(access(exportFile)).resolves.toBeUndefined();
+    await expect(getJob(deletion.cleanupJobId)).resolves.toMatchObject({
+      project_id: null,
+      job_type: "STORAGE_CLEANUP",
+      status: "QUEUED",
+      input_reference: {
+        deleteUntracked: false,
+        limit: 1_000,
+        objectIds: [uploadObjectId, exportObjectId]
+      }
+    });
+
+    const cleanupWorker = new DurableWorker(
+      createDocumentJobHandlers(createDocumentRuntime()),
+      {
+        workerId: `workflow-cleanup-${project.id}`,
+        concurrency: 1,
+        pollIntervalMs: 10,
+        leaseDurationMs: 2_000,
+        heartbeatIntervalMs: 200,
+        shutdownGraceMs: 2_000,
+        log: () => undefined
+      }
+    );
+    let cleanupJob: JobRow;
+    try {
+      expect(await cleanupWorker.runOnce()).toBe(1);
+      cleanupJob = await getJob(deletion.cleanupJobId);
+      for (
+        let attempt = 0;
+        attempt < 200 &&
+        (cleanupJob.status !== "SUCCEEDED" || cleanupWorker.activeJobCount !== 0);
+        attempt += 1
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        cleanupJob = await getJob(deletion.cleanupJobId);
+      }
+      expect(cleanupWorker.activeJobCount).toBe(0);
+    } finally {
+      await cleanupWorker.stop();
+    }
+    expect(cleanupJob!).toMatchObject({
+      status: "SUCCEEDED",
+      output_reference: { batches: 1, deletedTracked: 2 }
+    });
+    await expect(access(uploadFile)).rejects.toBeTruthy();
+    await expect(access(exportFile)).rejects.toBeTruthy();
+    await expect(
+      query<{ id: string; project_id: string | null; retention_status: string }>(
+        `SELECT id, project_id, retention_status FROM storage_objects
+         WHERE id = ANY($1::text[]) ORDER BY id`,
+        [[uploadObjectId, exportObjectId]]
+      )
+    ).resolves.toMatchObject({
+      rows: [
+        { id: exportObjectId, project_id: null, retention_status: "DELETED" },
+        { id: uploadObjectId, project_id: null, retention_status: "DELETED" }
+      ]
+    });
     const audit = await query<{ action: string }>(
       "SELECT action FROM audit_events WHERE project_id IS NULL AND resource_id = $1",
       [project.id]
@@ -223,7 +311,10 @@ describe("database and research workflow", () => {
     const response = await patchClaimReview(
       new Request(`http://localhost/api/projects/${project.id}/claims/${claim.id}`, {
         method: "PATCH",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "claim-review-route-fixture"
+        },
         body: JSON.stringify({ includeInReport: false })
       }),
       {
@@ -262,7 +353,10 @@ describe("database and research workflow", () => {
     const response = await postLedger(
       new Request(`http://localhost/api/projects/${routeProject.id}/ledger`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "cross-project-ledger-fixture"
+        },
         body: JSON.stringify({
           claimId: claim.id,
           evidenceId: evidence.id,
@@ -1279,13 +1373,86 @@ describe("database and research workflow", () => {
     });
     await query("DELETE FROM deliverables WHERE id = $1", [blankDeliverableId]);
     const deliverable = await getCurrentDeliverable(project.id);
+    const researchExecution = await createResearchRun({
+      projectId: project.id,
+      mode: "ORCHESTRATED",
+      idempotencyKey: "delivery-human-approval-run",
+      createdBy: "Workflow integration operator"
+    });
+    await query("DELETE FROM jobs WHERE run_id = $1", [researchExecution.run.id]);
+    await query(
+      "UPDATE research_run_stages SET status = 'SUCCEEDED', completed_at = NOW(), updated_at = NOW() WHERE run_id = $1",
+      [researchExecution.run.id]
+    );
+    await query(
+      "UPDATE research_runs SET status = 'APPROVAL_REQUIRED', progress = 100, started_at = NOW(), updated_at = NOW() WHERE id = $1",
+      [researchExecution.run.id]
+    );
     const manualQaFindingId = `qa-manual-low-${project.id}`;
     await query(
       "INSERT INTO qa_findings (id, project_id, deliverable_id, rule_code, severity, location, problem, remediation, resolution_status, metadata) VALUES ($1, $2, $3, 'UNREFERENCED_SOURCE', 'LOW', 'report:references', 'Synthetic review note.', 'Record the review decision.', 'OPEN', '{}'::jsonb)",
       [manualQaFindingId, project.id, deliverable.id]
     );
+    const staleEvidenceId = `evidence-stale-${project.id}`;
+    const currentClaimWithStaleEvidenceId = `claim-stale-evidence-${project.id}`;
+    await query(
+      `INSERT INTO evidence (
+         id, source_id, summary, confidence, verification_status, is_current
+       ) VALUES ($1, $2, 'Superseded evidence must not satisfy approval.',
+         'HIGH', 'VERIFIED', FALSE)`,
+      [staleEvidenceId, source.id]
+    );
+    await query(
+      `INSERT INTO claims (
+         id, project_id, question_id, content, claim_type, importance,
+         support_status, fact_or_inference, include_in_report, is_current
+       ) VALUES ($1, $2, $3, 'A current claim cannot rely on superseded evidence.',
+         'FACT', 'HIGH', 'SUPPORTED', 'FACT', TRUE, TRUE)`,
+      [currentClaimWithStaleEvidenceId, project.id, question.id]
+    );
+    await query(
+      "INSERT INTO claim_evidence (claim_id, evidence_id, relationship) VALUES ($1, $2, 'SUPPORTS')",
+      [currentClaimWithStaleEvidenceId, staleEvidenceId]
+    );
+    await expect(runApprovalAction(project.id, "request")).rejects.toMatchObject({
+      code: "WORKFLOW_INCOMPLETE",
+      message: expect.stringContaining("claims")
+    });
+    await query("UPDATE claims SET is_current = FALSE WHERE id = $1", [
+      currentClaimWithStaleEvidenceId
+    ]);
+    await query(
+      `INSERT INTO findings (
+         id, project_id, question_id, finding, importance, is_current
+       ) VALUES ($1, $2, $3, 'Superseded unlinked finding.', 'HIGH', FALSE)`,
+      [`finding-stale-${project.id}`, project.id, question.id]
+    );
+    await query(
+      `INSERT INTO qa_findings (
+         id, project_id, deliverable_id, rule_code, severity, location,
+         problem, remediation, resolution_status, metadata, is_current
+       ) VALUES ($1, $2, $3, 'STALE_FIXTURE_BLOCKER', 'BLOCKER',
+         'history:stale', 'Superseded blocker.', 'Keep as history.', 'OPEN',
+         '{}'::jsonb, FALSE)`,
+      [`qa-stale-blocker-${project.id}`, project.id, deliverable.id]
+    );
     await runApprovalAction(project.id, "request");
-    await runApprovalAction(project.id, "approve", true);
+    const humanApproval = await runApprovalAction(project.id, "approve", true);
+    expect(humanApproval.completedRunId).toBe(researchExecution.run.id);
+    await expect(
+      query<{ status: string; progress: number; completed_at: Date | null }>(
+        "SELECT status, progress, completed_at FROM research_runs WHERE id = $1",
+        [researchExecution.run.id]
+      )
+    ).resolves.toMatchObject({
+      rows: [{ status: "COMPLETED", progress: 100, completed_at: expect.any(Date) }]
+    });
+    await expect(
+      query<{ count: number }>(
+        "SELECT COUNT(*)::integer AS count FROM audit_events WHERE resource_type = 'research_run' AND resource_id = $1 AND action = 'RESEARCH_RUN_COMPLETED'",
+        [researchExecution.run.id]
+      )
+    ).resolves.toMatchObject({ rows: [{ count: 1 }] });
 
     const staleExportData = await loadExportData(project.id, true);
     await query(
@@ -1329,6 +1496,37 @@ describe("database and research workflow", () => {
     expect(parsedDocx.file("word/document.xml")).toBeTruthy();
 
     const zip = await generateArtifact(project.id, "ZIP");
+    const replayedZip = await generateArtifact(project.id, "ZIP");
+    expect(replayedZip.buffer.equals(zip.buffer)).toBe(true);
+    await expect(
+      query<{
+        exports: number;
+        objects: number;
+        input_hash: string;
+        persistence_status: string;
+        provider: string;
+      }>(
+        `SELECT COUNT(DISTINCT pe.id)::integer AS exports,
+          COUNT(DISTINCT so.id)::integer AS objects,
+          MIN(pe.input_hash) AS input_hash,
+          MIN(pe.persistence_status) AS persistence_status,
+          MIN(so.provider) AS provider
+         FROM project_exports pe
+         JOIN storage_objects so ON so.id = pe.storage_object_id
+         WHERE pe.project_id = $1`,
+        [project.id]
+      )
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          exports: 1,
+          objects: 1,
+          input_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+          persistence_status: "AVAILABLE",
+          provider: "LOCAL"
+        }
+      ]
+    });
     const delivery = await JSZip.loadAsync(zip.buffer);
     for (const filename of [
       "final-report.md",
