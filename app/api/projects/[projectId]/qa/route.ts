@@ -1,14 +1,14 @@
-import { handleRoute } from "@/lib/http";
+import { handleAuthenticatedRoute } from "@/lib/http";
 import { listQaFindings, runProjectQa } from "@/lib/services/qa";
 
 type Context = { params: Promise<{ projectId: string }> };
 
-export async function GET(_request: Request, context: Context) {
+export async function GET(request: Request, context: Context) {
   const { projectId } = await context.params;
-  return handleRoute(() => listQaFindings(projectId));
+  return handleAuthenticatedRoute(request, () => listQaFindings(projectId));
 }
 
-export async function POST(_request: Request, context: Context) {
+export async function POST(request: Request, context: Context) {
   const { projectId } = await context.params;
-  return handleRoute(() => runProjectQa(projectId));
+  return handleAuthenticatedRoute(request, () => runProjectQa(projectId));
 }

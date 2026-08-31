@@ -1,17 +1,19 @@
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
-import path from "node:path";
 import type { PoolClient } from "pg";
 import { query, withTransaction } from "@/lib/db";
-import { getConfig } from "@/lib/config";
 import { projectIntakeSchema, reportSectionsSchema, type ProjectIntake } from "@/lib/validation";
 import { projectScopeUpdateSchema } from "@/lib/validation";
-import { writeAuditEvent } from "@/lib/services/audit";
-import { AppError, conflict, notFound } from "@/lib/services/errors";
+import {
+  LOCAL_USER_AUDIT_ACTOR,
+  writeAuditEvent,
+  type AuditActor
+} from "@/lib/services/audit";
+import { conflict, notFound } from "@/lib/services/errors";
 import { assessSourceFreshness } from "@/lib/domain/research";
 import { refreshProjectProgress } from "@/lib/services/progress";
 import { invalidateDownstreamReview } from "@/lib/services/review-state";
 import { refreshProjectClaimSupport } from "@/lib/services/ledger";
+import { submitJobInTransaction } from "@/lib/services/jobs";
 
 type ProjectRow = {
   id: string;
@@ -94,7 +96,10 @@ async function resolveClient(
   return id;
 }
 
-export async function createProject(rawInput: unknown): Promise<ProjectRow> {
+export async function createProject(
+  rawInput: unknown,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
+): Promise<ProjectRow> {
   const input = projectIntakeSchema.parse(rawInput);
   return withTransaction(async (client) => {
     const workspaceId = await ensureDefaultWorkspace(client);
@@ -128,8 +133,7 @@ export async function createProject(rawInput: unknown): Promise<ProjectRow> {
     );
     await writeAuditEvent(client, {
       projectId: id,
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action: "PROJECT_CREATED",
       resourceType: "research_project",
       resourceId: id,
@@ -178,7 +182,8 @@ export async function getProject(projectId: string): Promise<ProjectRow> {
 
 export async function updateProjectScope(
   projectId: string,
-  rawInput: unknown
+  rawInput: unknown,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
 ): Promise<ProjectRow> {
   const input = projectScopeUpdateSchema.parse(rawInput);
   return withTransaction(async (client) => {
@@ -231,8 +236,7 @@ export async function updateProjectScope(
     await invalidateDownstreamReview(client, projectId, "RESEARCHING");
     await writeAuditEvent(client, {
       projectId,
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action: "PROJECT_SCOPE_UPDATED",
       resourceType: "research_project",
       resourceId: projectId,
@@ -265,20 +269,20 @@ export async function getProjectBundle(projectId: string): Promise<Record<string
     query("SELECT * FROM research_plans WHERE project_id = $1 ORDER BY created_at", [projectId]),
     query("SELECT * FROM sources WHERE project_id = $1 ORDER BY accessed_at DESC", [projectId]),
     query(
-      "SELECT e.*, s.title AS source_title, s.publisher, s.reliability_grade, s.freshness_status FROM evidence e JOIN sources s ON s.id = e.source_id WHERE s.project_id = $1 ORDER BY e.created_at",
+      "SELECT e.*, s.title AS source_title, s.publisher, s.reliability_grade, s.freshness_status FROM evidence e JOIN sources s ON s.id = e.source_id WHERE s.project_id = $1 AND e.is_current = TRUE ORDER BY e.created_at",
       [projectId]
     ),
     query(
-      "SELECT c.*, COALESCE(json_agg(json_build_object('evidenceId', ce.evidence_id, 'relationship', ce.relationship, 'sourceId', e.source_id)) FILTER (WHERE ce.evidence_id IS NOT NULL), '[]'::json) AS evidence_links FROM claims c LEFT JOIN claim_evidence ce ON ce.claim_id = c.id LEFT JOIN evidence e ON e.id = ce.evidence_id WHERE c.project_id = $1 GROUP BY c.id ORDER BY c.importance, c.created_at",
+      "SELECT c.*, COALESCE(json_agg(json_build_object('evidenceId', e.id, 'relationship', ce.relationship, 'sourceId', e.source_id)) FILTER (WHERE e.id IS NOT NULL), '[]'::json) AS evidence_links FROM claims c LEFT JOIN claim_evidence ce ON ce.claim_id = c.id LEFT JOIN evidence e ON e.id = ce.evidence_id AND e.is_current = TRUE WHERE c.project_id = $1 AND c.is_current = TRUE GROUP BY c.id ORDER BY c.importance, c.created_at",
       [projectId]
     ),
     query(
-      "SELECT f.*, COALESCE(array_agg(fc.claim_id) FILTER (WHERE fc.claim_id IS NOT NULL), ARRAY[]::TEXT[]) AS claim_ids FROM findings f LEFT JOIN finding_claims fc ON fc.finding_id = f.id WHERE f.project_id = $1 GROUP BY f.id ORDER BY f.created_at",
+      "SELECT f.*, COALESCE(array_agg(c.id) FILTER (WHERE c.id IS NOT NULL), ARRAY[]::TEXT[]) AS claim_ids FROM findings f LEFT JOIN finding_claims fc ON fc.finding_id = f.id LEFT JOIN claims c ON c.id = fc.claim_id AND c.is_current = TRUE WHERE f.project_id = $1 AND f.is_current = TRUE GROUP BY f.id ORDER BY f.created_at",
       [projectId]
     ),
     query("SELECT * FROM deliverables WHERE project_id = $1 ORDER BY version DESC", [projectId]),
     query(
-      "SELECT * FROM qa_findings WHERE project_id = $1 ORDER BY CASE severity WHEN 'BLOCKER' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END, created_at DESC",
+      "SELECT * FROM qa_findings WHERE project_id = $1 AND is_current = TRUE ORDER BY CASE severity WHEN 'BLOCKER' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END, created_at DESC",
       [projectId]
     ),
     query("SELECT * FROM audit_events WHERE project_id = $1 ORDER BY created_at DESC LIMIT 100", [projectId])
@@ -297,7 +301,10 @@ export async function getProjectBundle(projectId: string): Promise<Record<string
   };
 }
 
-export async function approveScope(projectId: string): Promise<ProjectRow> {
+export async function approveScope(
+  projectId: string,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
+): Promise<ProjectRow> {
   return withTransaction(async (client) => {
     const before = await client.query<ProjectRow>(
       "SELECT * FROM research_projects WHERE id = $1 FOR UPDATE",
@@ -318,8 +325,7 @@ export async function approveScope(projectId: string): Promise<ProjectRow> {
     );
     await writeAuditEvent(client, {
       projectId,
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action: "SCOPE_APPROVED",
       resourceType: "research_project",
       resourceId: projectId,
@@ -332,7 +338,11 @@ export async function approveScope(projectId: string): Promise<ProjectRow> {
   });
 }
 
-export async function approvePlan(projectId: string, planId?: string): Promise<ProjectRow> {
+export async function approvePlan(
+  projectId: string,
+  planId?: string,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
+): Promise<ProjectRow> {
   return withTransaction(async (client) => {
     const project = await client.query<ProjectRow>(
       "SELECT * FROM research_projects WHERE id = $1 FOR UPDATE",
@@ -390,8 +400,7 @@ export async function approvePlan(projectId: string, planId?: string): Promise<P
     }
     await writeAuditEvent(client, {
       projectId,
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action: planId ? "PLAN_ITEM_APPROVED" : "PLAN_APPROVED",
       resourceType: "research_plan",
       resourceId: planId
@@ -402,8 +411,11 @@ export async function approvePlan(projectId: string, planId?: string): Promise<P
   });
 }
 
-export async function deleteProject(projectId: string): Promise<void> {
-  const projectName = await withTransaction(async (client) => {
+export async function deleteProject(
+  projectId: string,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
+): Promise<{ cleanupJobId: string; objectCount: number }> {
+  return withTransaction(async (client) => {
     const project = await client.query<{ name: string }>(
       "SELECT name FROM research_projects WHERE id = $1 FOR UPDATE",
       [projectId]
@@ -411,46 +423,90 @@ export async function deleteProject(projectId: string): Promise<void> {
     if (!project.rows[0]) {
       throw notFound("Project");
     }
+    const legalHold = await client.query<{ count: number }>(
+      "SELECT COUNT(*)::integer AS count FROM storage_objects" +
+        " WHERE project_id = $1 AND retention_status = 'LEGAL_HOLD'",
+      [projectId]
+    );
+    if (legalHold.rows[0].count > 0) {
+      throw conflict(
+        "PROJECT_LEGAL_HOLD",
+        "The project has storage objects under legal hold and cannot be deleted."
+      );
+    }
+    const activeJobs = await client.query<{ id: string; status: string }>(
+      `SELECT id, status FROM jobs
+       WHERE project_id = $1 AND status IN (
+         'QUEUED', 'CLAIMED', 'RUNNING', 'RETRY_WAIT', 'CANCELLATION_REQUESTED'
+       )
+       ORDER BY id FOR UPDATE`,
+      [projectId]
+    );
+    if (
+      activeJobs.rows.some((job) =>
+        ["CLAIMED", "RUNNING", "CANCELLATION_REQUESTED"].includes(job.status)
+      )
+    ) {
+      throw conflict(
+        "PROJECT_JOBS_ACTIVE",
+        "Cancel active project jobs, wait for their workers to drain, and retry project deletion."
+      );
+    }
+    const cancelledJobs = await client.query<{ id: string }>(
+      `UPDATE jobs SET status = 'CANCELLED', cancellation_requested_at = COALESCE(cancellation_requested_at, NOW()),
+        completed_at = NOW(), lease_owner = NULL, lease_expires_at = NULL,
+        heartbeat_at = NULL, error_class = 'CANCELLED',
+        sanitized_error = 'Project deletion cancelled this job.', updated_at = NOW(),
+        version = version + 1
+       WHERE project_id = $1 AND status IN ('QUEUED', 'RETRY_WAIT') RETURNING id`,
+      [projectId]
+    );
+    const cancelledRuns = await client.query<{ id: string }>(
+      `UPDATE research_runs SET status = 'CANCELLED', cancelled_by = $2,
+        completed_at = NOW(), updated_at = NOW(), version = version + 1
+       WHERE project_id = $1 AND status NOT IN ('CANCELLED', 'FAILED', 'COMPLETED')
+       RETURNING id`,
+      [projectId, actor.actorLabel]
+    );
+    const pendingObjects = await client.query<{ id: string }>(
+      `UPDATE storage_objects SET retention_status = 'PENDING_DELETE',
+        cleanup_lease_owner = NULL, cleanup_lease_expires_at = NULL,
+        last_error = NULL, updated_at = NOW()
+       WHERE project_id = $1 AND retention_status IN ('ACTIVE', 'PENDING_DELETE')
+       RETURNING id`,
+      [projectId]
+    );
     await client.query("DELETE FROM research_projects WHERE id = $1", [projectId]);
+    const cleanup = await submitJobInTransaction(client, {
+      jobType: "STORAGE_CLEANUP",
+      inputReference: {
+        deleteUntracked: false,
+        limit: 1_000,
+        objectIds: pendingObjects.rows.map((object) => object.id)
+      },
+      idempotencyKey: `project-delete:${projectId}:storage-cleanup`,
+      priority: 50,
+      maxAttempts: 10,
+      correlationId: `project-delete:${projectId}`
+    });
     await writeAuditEvent(client, {
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action: "PROJECT_DELETED",
       resourceType: "research_project",
       resourceId: projectId,
-      beforeState: { name: project.rows[0].name }
+      beforeState: {
+        name: project.rows[0].name,
+        cancelledJobCount: cancelledJobs.rows.length,
+        cancelledRunCount: cancelledRuns.rows.length,
+        pendingObjectCount: pendingObjects.rows.length
+      },
+      afterState: { cleanupJobId: cleanup.job.id }
     });
-    return project.rows[0].name;
+    return {
+      cleanupJobId: cleanup.job.id,
+      objectCount: pendingObjects.rows.length
+    };
   });
-  const storageRoot = path.resolve(getConfig().storageDir);
-  const targets = ["uploads", "exports"].map((category) => {
-    const categoryRoot = path.resolve(storageRoot, category);
-    const target = path.resolve(categoryRoot, projectId);
-    if (!target.startsWith(categoryRoot + path.sep)) {
-      throw new AppError(500, "STORAGE_PATH_INVALID", "Project storage path validation failed.");
-    }
-    return target;
-  });
-  try {
-    await Promise.all(targets.map((target) => rm(target, { recursive: true, force: true })));
-  } catch (error) {
-    await withTransaction((client) =>
-      writeAuditEvent(client, {
-        actorType: "SYSTEM",
-        actorLabel: "Storage cleanup",
-        action: "PROJECT_STORAGE_DELETE_FAILED",
-        resourceType: "research_project",
-        resourceId: projectId,
-        beforeState: { name: projectName },
-        afterState: { error: error instanceof Error ? error.message : "Unknown cleanup error" }
-      })
-    );
-    throw new AppError(
-      500,
-      "STORAGE_DELETE_FAILED",
-      "The project database record was deleted, but private file cleanup failed."
-    );
-  }
 }
 
 export async function getDashboard(): Promise<Record<string, unknown>> {
@@ -463,7 +519,7 @@ export async function getDashboard(): Promise<Record<string, unknown>> {
       open_gaps: string;
       unsupported_claims: string;
     }>(
-      "SELECT COUNT(DISTINCT p.id) FILTER (WHERE p.status NOT IN ('DELIVERED', 'ARCHIVED'))::text AS active_projects, COUNT(DISTINCT p.id) FILTER (WHERE p.deadline BETWEEN CURRENT_DATE AND CURRENT_DATE + 7 AND p.status NOT IN ('DELIVERED', 'ARCHIVED'))::text AS due_soon, COUNT(DISTINCT p.id) FILTER (WHERE qf.severity = 'BLOCKER' AND qf.resolution_status <> 'RESOLVED')::text AS qa_blocked, COUNT(DISTINCT p.id) FILTER (WHERE p.approval_status = 'PENDING')::text AS awaiting_approval, (SELECT COUNT(*) FROM research_questions rq WHERE rq.gap_status = 'OPEN')::text AS open_gaps, (SELECT COUNT(*) FROM claims c WHERE c.support_status = 'UNSUPPORTED' AND c.include_in_report = TRUE)::text AS unsupported_claims FROM research_projects p LEFT JOIN qa_findings qf ON qf.project_id = p.id"
+      "SELECT COUNT(DISTINCT p.id) FILTER (WHERE p.status NOT IN ('DELIVERED', 'ARCHIVED'))::text AS active_projects, COUNT(DISTINCT p.id) FILTER (WHERE p.deadline BETWEEN CURRENT_DATE AND CURRENT_DATE + 7 AND p.status NOT IN ('DELIVERED', 'ARCHIVED'))::text AS due_soon, COUNT(DISTINCT p.id) FILTER (WHERE qf.is_current = TRUE AND qf.severity = 'BLOCKER' AND qf.resolution_status <> 'RESOLVED')::text AS qa_blocked, COUNT(DISTINCT p.id) FILTER (WHERE p.approval_status = 'PENDING')::text AS awaiting_approval, (SELECT COUNT(*) FROM research_questions rq WHERE rq.gap_status = 'OPEN')::text AS open_gaps, (SELECT COUNT(*) FROM claims c WHERE c.is_current = TRUE AND c.support_status = 'UNSUPPORTED' AND c.include_in_report = TRUE)::text AS unsupported_claims FROM research_projects p LEFT JOIN qa_findings qf ON qf.project_id = p.id"
     ),
     listProjects(),
     query(

@@ -8,7 +8,11 @@ import {
   type QaReportSection
 } from "@/lib/domain/qa";
 import { conflict, notFound } from "@/lib/services/errors";
-import { writeAuditEvent } from "@/lib/services/audit";
+import {
+  LOCAL_USER_AUDIT_ACTOR,
+  writeAuditEvent,
+  type AuditActor
+} from "@/lib/services/audit";
 import { refreshProjectProgress } from "@/lib/services/progress";
 import { invalidateDownstreamReview } from "@/lib/services/review-state";
 import type { ReportSections } from "@/lib/validation";
@@ -98,7 +102,7 @@ async function buildQaContext(client: PoolClient, projectId: string): Promise<{
     minimal_quote: string | null;
     summary: string;
   }>(
-    "SELECT e.* FROM evidence e JOIN sources s ON s.id = e.source_id WHERE s.project_id = $1",
+    "SELECT e.* FROM evidence e JOIN sources s ON s.id = e.source_id WHERE s.project_id = $1 AND e.is_current = TRUE",
     [projectId]
   );
   const claimsResult = await client.query<{
@@ -112,13 +116,13 @@ async function buildQaContext(client: PoolClient, projectId: string): Promise<{
     within_scope: boolean;
     question_id: string | null;
     resolution_notes: string | null;
-  }>("SELECT * FROM claims WHERE project_id = $1", [projectId]);
+  }>("SELECT * FROM claims WHERE project_id = $1 AND is_current = TRUE", [projectId]);
   const linksResult = await client.query<{
     claim_id: string;
     evidence_id: string;
     relationship: "SUPPORTS" | "REFUTES" | "CONTEXT";
   }>(
-    "SELECT ce.* FROM claim_evidence ce JOIN claims c ON c.id = ce.claim_id WHERE c.project_id = $1",
+    "SELECT ce.* FROM claim_evidence ce JOIN claims c ON c.id = ce.claim_id JOIN evidence e ON e.id = ce.evidence_id WHERE c.project_id = $1 AND c.is_current = TRUE AND e.is_current = TRUE",
     [projectId]
   );
   const questionsResult = await client.query<{
@@ -389,7 +393,7 @@ export async function runProjectQa(projectId: string): Promise<{
       );
     }
     const blockers = await client.query<{ count: string }>(
-      "SELECT COUNT(*)::text AS count FROM qa_findings WHERE project_id = $1 AND severity = 'BLOCKER' AND resolution_status <> 'RESOLVED'",
+      "SELECT COUNT(*)::text AS count FROM qa_findings WHERE project_id = $1 AND is_current = TRUE AND severity = 'BLOCKER' AND resolution_status <> 'RESOLVED'",
       [projectId]
     );
     const passed = Number(blockers.rows[0].count) === 0;
@@ -417,7 +421,8 @@ export async function runProjectQa(projectId: string): Promise<{
 export async function resolveQaFinding(
   projectId: string,
   findingId: string,
-  resolutionStatus: "RESOLVED" | "ACCEPTED_RISK"
+  resolutionStatus: "RESOLVED" | "ACCEPTED_RISK",
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
 ): Promise<Record<string, unknown>> {
   return withTransaction(async (client) => {
     const project = await client.query(
@@ -428,7 +433,7 @@ export async function resolveQaFinding(
       throw notFound("Project");
     }
     const before = await client.query(
-      "SELECT * FROM qa_findings WHERE id = $1 AND project_id = $2 FOR UPDATE",
+      "SELECT * FROM qa_findings WHERE id = $1 AND project_id = $2 AND is_current = TRUE FOR UPDATE",
       [findingId, projectId]
     );
     if (!before.rows[0]) {
@@ -447,8 +452,7 @@ export async function resolveQaFinding(
     }
     await writeAuditEvent(client, {
       projectId,
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action: "QA_FINDING_UPDATED",
       resourceType: "qa_finding",
       resourceId: findingId,
@@ -466,7 +470,7 @@ export async function listQaFindings(projectId: string): Promise<Record<string, 
     throw notFound("Project");
   }
   const result = await query<Record<string, unknown>>(
-    "SELECT * FROM qa_findings WHERE project_id = $1 ORDER BY CASE severity WHEN 'BLOCKER' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END, created_at DESC",
+    "SELECT * FROM qa_findings WHERE project_id = $1 AND is_current = TRUE ORDER BY CASE severity WHEN 'BLOCKER' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END, created_at DESC",
     [projectId]
   );
   return result.rows;

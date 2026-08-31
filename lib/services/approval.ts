@@ -1,6 +1,10 @@
 import { withTransaction } from "@/lib/db";
 import { conflict, notFound } from "@/lib/services/errors";
-import { writeAuditEvent } from "@/lib/services/audit";
+import {
+  LOCAL_USER_AUDIT_ACTOR,
+  writeAuditEvent,
+  type AuditActor
+} from "@/lib/services/audit";
 import { refreshProjectProgress } from "@/lib/services/progress";
 
 type ApprovalAction = "request" | "approve" | "deliver";
@@ -17,9 +21,11 @@ type WorkflowReadiness = {
 export async function runApprovalAction(
   projectId: string,
   action: ApprovalAction,
-  confirmation = false
+  confirmation = false,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
 ): Promise<Record<string, unknown>> {
   return withTransaction(async (client) => {
+    let completedRunId: string | null = null;
     const project = await client.query<{
       status: string;
       approval_status: string;
@@ -32,7 +38,7 @@ export async function runApprovalAction(
       throw notFound("Project");
     }
     const blockers = await client.query<{ count: string }>(
-      "SELECT COUNT(*)::text AS count FROM qa_findings WHERE project_id = $1 AND severity = 'BLOCKER' AND resolution_status <> 'RESOLVED'",
+      "SELECT COUNT(*)::text AS count FROM qa_findings WHERE project_id = $1 AND is_current = TRUE AND severity = 'BLOCKER' AND resolution_status <> 'RESOLVED'",
       [projectId]
     );
     if (Number(blockers.rows[0].count) > 0 || !project.rows[0].qa_passed_at) {
@@ -43,8 +49,8 @@ export async function runApprovalAction(
         "(p.scope_approved_at IS NOT NULL) AS scope_ready, " +
         "(p.plan_approved_at IS NOT NULL AND EXISTS (SELECT 1 FROM research_questions rq WHERE rq.project_id = p.id) AND NOT EXISTS (SELECT 1 FROM research_questions rq WHERE rq.project_id = p.id AND NOT EXISTS (SELECT 1 FROM research_plans rp WHERE rp.question_id = rq.id AND rp.project_id = p.id AND rp.human_approved = TRUE))) AS plan_ready, " +
         "(EXISTS (SELECT 1 FROM research_questions rq WHERE rq.project_id = p.id) AND NOT EXISTS (SELECT 1 FROM research_questions rq WHERE rq.project_id = p.id AND rq.status <> 'COMPLETE' AND rq.gap_status NOT IN ('ACCEPTED', 'RESOLVED'))) AS questions_ready, " +
-        "(EXISTS (SELECT 1 FROM claims c WHERE c.project_id = p.id AND c.include_in_report = TRUE) AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.project_id = p.id AND c.include_in_report = TRUE AND (c.verification_possible = FALSE OR NOT EXISTS (SELECT 1 FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id WHERE ce.claim_id = c.id AND ce.relationship = 'SUPPORTS' AND e.verification_status = 'VERIFIED')))) AS claims_ready, " +
-        "(EXISTS (SELECT 1 FROM findings f WHERE f.project_id = p.id) AND NOT EXISTS (SELECT 1 FROM findings f WHERE f.project_id = p.id AND NOT EXISTS (SELECT 1 FROM finding_claims fc JOIN claims c ON c.id = fc.claim_id WHERE fc.finding_id = f.id AND c.include_in_report = TRUE AND c.verification_possible = TRUE AND EXISTS (SELECT 1 FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id WHERE ce.claim_id = c.id AND ce.relationship = 'SUPPORTS' AND e.verification_status = 'VERIFIED')))) AS findings_ready, " +
+        "(EXISTS (SELECT 1 FROM claims c WHERE c.project_id = p.id AND c.is_current = TRUE AND c.include_in_report = TRUE) AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.project_id = p.id AND c.is_current = TRUE AND c.include_in_report = TRUE AND (c.verification_possible = FALSE OR NOT EXISTS (SELECT 1 FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id WHERE ce.claim_id = c.id AND ce.relationship = 'SUPPORTS' AND e.is_current = TRUE AND e.verification_status = 'VERIFIED')))) AS claims_ready, " +
+        "(EXISTS (SELECT 1 FROM findings f WHERE f.project_id = p.id AND f.is_current = TRUE) AND NOT EXISTS (SELECT 1 FROM findings f WHERE f.project_id = p.id AND f.is_current = TRUE AND NOT EXISTS (SELECT 1 FROM finding_claims fc JOIN claims c ON c.id = fc.claim_id WHERE fc.finding_id = f.id AND c.is_current = TRUE AND c.include_in_report = TRUE AND c.verification_possible = TRUE AND EXISTS (SELECT 1 FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id WHERE ce.claim_id = c.id AND ce.relationship = 'SUPPORTS' AND e.is_current = TRUE AND e.verification_status = 'VERIFIED')))) AS findings_ready, " +
         "COALESCE((SELECT REGEXP_REPLACE(COALESCE(d.sections->>'researchPurpose', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'executiveSummary', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'researchScope', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'methodology', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'keyFindings', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'detailedAnalysis', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'risksAndLimitations', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'recommendations', ''), '[[:space:]]', '', 'g') <> '' AND REGEXP_REPLACE(COALESCE(d.sections->>'references', ''), '[[:space:]]', '', 'g') <> '' FROM deliverables d WHERE d.project_id = p.id ORDER BY d.version DESC LIMIT 1), FALSE) AS report_ready " +
         "FROM research_projects p WHERE p.id = $1",
       [projectId]
@@ -93,6 +99,35 @@ export async function runApprovalAction(
         "UPDATE deliverables SET approval_status = 'APPROVED', updated_at = NOW() WHERE id = (SELECT id FROM deliverables WHERE project_id = $1 ORDER BY version DESC LIMIT 1)",
         [projectId]
       );
+      const completedRun = await client.query<{ id: string }>(
+        `WITH selected AS (
+           SELECT id FROM research_runs
+           WHERE project_id = $1 AND status = 'APPROVAL_REQUIRED'
+           ORDER BY created_at DESC, id DESC
+           LIMIT 1
+           FOR UPDATE
+         )
+         UPDATE research_runs r
+         SET status = 'COMPLETED', progress = 100, current_stage = NULL,
+             block_reason = NULL, failure_reason = NULL,
+             completed_at = NOW(), updated_at = NOW(), version = version + 1
+         FROM selected
+         WHERE r.id = selected.id
+         RETURNING r.id`,
+        [projectId]
+      );
+      completedRunId = completedRun.rows[0]?.id ?? null;
+      if (completedRunId) {
+        await writeAuditEvent(client, {
+          projectId,
+          ...actor,
+          action: "RESEARCH_RUN_COMPLETED",
+          resourceType: "research_run",
+          resourceId: completedRunId,
+          beforeState: { status: "APPROVAL_REQUIRED" },
+          afterState: { status: "COMPLETED", completedByHumanApproval: true }
+        });
+      }
     } else {
       if (project.rows[0].status !== "APPROVED") {
         throw conflict(
@@ -118,8 +153,7 @@ export async function runApprovalAction(
 
     await writeAuditEvent(client, {
       projectId,
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action:
         action === "request"
           ? "APPROVAL_REQUESTED"
@@ -136,6 +170,6 @@ export async function runApprovalAction(
       "SELECT * FROM research_projects WHERE id = $1",
       [projectId]
     );
-    return { project: updated.rows[0], progress };
+    return { project: updated.rows[0], progress, completedRunId };
   });
 }

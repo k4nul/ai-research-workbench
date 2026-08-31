@@ -6,7 +6,11 @@ import {
   claimReviewUpdateSchema,
   findingInputSchema
 } from "@/lib/validation";
-import { writeAuditEvent } from "@/lib/services/audit";
+import {
+  LOCAL_USER_AUDIT_ACTOR,
+  writeAuditEvent,
+  type AuditActor
+} from "@/lib/services/audit";
 import { notFound } from "@/lib/services/errors";
 import { refreshProjectProgress } from "@/lib/services/progress";
 import { invalidateDownstreamReview } from "@/lib/services/review-state";
@@ -22,7 +26,7 @@ export async function refreshClaimSupport(
     freshness_status: "CURRENT" | "AGING" | "OUTDATED" | "UNKNOWN";
     support_extent: "FULL" | "PARTIAL";
   }>(
-    "SELECT ce.relationship, e.verification_status, e.support_extent, s.freshness_status FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id JOIN sources s ON s.id = e.source_id WHERE ce.claim_id = $1",
+    "SELECT ce.relationship, e.verification_status, e.support_extent, s.freshness_status FROM claim_evidence ce JOIN evidence e ON e.id = ce.evidence_id JOIN sources s ON s.id = e.source_id WHERE ce.claim_id = $1 AND e.is_current = TRUE",
     [claimId]
   );
   const claim = await client.query<{ verification_possible: boolean }>(
@@ -50,7 +54,7 @@ export async function refreshProjectClaimSupport(
   projectId: string
 ): Promise<void> {
   const claims = await client.query<{ id: string }>(
-    "SELECT id FROM claims WHERE project_id = $1",
+    "SELECT id FROM claims WHERE project_id = $1 AND is_current = TRUE",
     [projectId]
   );
   for (const claim of claims.rows) {
@@ -60,7 +64,8 @@ export async function refreshProjectClaimSupport(
 
 export async function addClaim(
   projectId: string,
-  rawInput: unknown
+  rawInput: unknown,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
 ): Promise<Record<string, unknown>> {
   const input = claimInputSchema.parse(rawInput);
   return withTransaction(async (client) => {
@@ -98,8 +103,7 @@ export async function addClaim(
     await invalidateDownstreamReview(client, projectId, "SYNTHESIZING");
     await writeAuditEvent(client, {
       projectId,
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action: "CLAIM_CREATED",
       resourceType: "claim",
       resourceId: id,
@@ -112,12 +116,13 @@ export async function addClaim(
 
 export async function linkClaimEvidence(
   projectId: string,
-  rawInput: unknown
+  rawInput: unknown,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
 ): Promise<Record<string, unknown>> {
   const input = claimEvidenceLinkSchema.parse(rawInput);
   return withTransaction(async (client) => {
     const relation = await client.query<{ project_id: string }>(
-      "SELECT c.project_id FROM claims c JOIN evidence e ON e.id = $2 JOIN sources s ON s.id = e.source_id WHERE c.id = $1 AND c.project_id = $3 AND s.project_id = $3",
+      "SELECT c.project_id FROM claims c JOIN evidence e ON e.id = $2 JOIN sources s ON s.id = e.source_id WHERE c.id = $1 AND c.project_id = $3 AND s.project_id = $3 AND c.is_current = TRUE AND e.is_current = TRUE",
       [input.claimId, input.evidenceId, projectId]
     );
     if (!relation.rows[0]) {
@@ -135,8 +140,7 @@ export async function linkClaimEvidence(
     );
     await writeAuditEvent(client, {
       projectId: relation.rows[0].project_id,
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action: "CLAIM_EVIDENCE_LINKED",
       resourceType: "claim",
       resourceId: input.claimId,
@@ -154,7 +158,8 @@ export async function linkClaimEvidence(
 export async function updateClaimReview(
   projectId: string,
   claimId: string,
-  rawInput: unknown
+  rawInput: unknown,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
 ): Promise<Record<string, unknown>> {
   const input = claimReviewUpdateSchema.parse(rawInput);
   return withTransaction(async (client) => {
@@ -163,7 +168,7 @@ export async function updateClaimReview(
       within_scope: boolean;
       resolution_notes: string | null;
     }>(
-      "SELECT include_in_report, within_scope, resolution_notes FROM claims WHERE id = $1 AND project_id = $2 FOR UPDATE",
+      "SELECT include_in_report, within_scope, resolution_notes FROM claims WHERE id = $1 AND project_id = $2 AND is_current = TRUE FOR UPDATE",
       [claimId, projectId]
     );
     if (!before.rows[0]) {
@@ -185,8 +190,7 @@ export async function updateClaimReview(
     await invalidateDownstreamReview(client, projectId, "SYNTHESIZING");
     await writeAuditEvent(client, {
       projectId,
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action: "CLAIM_REVIEW_UPDATED",
       resourceType: "claim",
       resourceId: claimId,
@@ -203,7 +207,7 @@ export async function listLedger(
   unsupportedOnly = false
 ): Promise<Record<string, unknown>[]> {
   const result = await query<Record<string, unknown>>(
-    "SELECT c.*, COALESCE(json_agg(json_build_object('evidenceId', e.id, 'summary', e.summary, 'quote', e.minimal_quote, 'relationship', ce.relationship, 'supportExtent', e.support_extent, 'sourceId', s.id, 'sourceTitle', s.title, 'publisher', s.publisher, 'reliability', s.reliability_grade, 'freshness', s.freshness_status)) FILTER (WHERE e.id IS NOT NULL), '[]'::json) AS linked_evidence FROM claims c LEFT JOIN claim_evidence ce ON ce.claim_id = c.id LEFT JOIN evidence e ON e.id = ce.evidence_id LEFT JOIN sources s ON s.id = e.source_id WHERE c.project_id = $1" +
+    "SELECT c.*, COALESCE(json_agg(json_build_object('evidenceId', e.id, 'summary', e.summary, 'quote', e.minimal_quote, 'relationship', ce.relationship, 'supportExtent', e.support_extent, 'sourceId', s.id, 'sourceTitle', s.title, 'publisher', s.publisher, 'reliability', s.reliability_grade, 'freshness', s.freshness_status)) FILTER (WHERE e.id IS NOT NULL), '[]'::json) AS linked_evidence FROM claims c LEFT JOIN claim_evidence ce ON ce.claim_id = c.id LEFT JOIN evidence e ON e.id = ce.evidence_id AND e.is_current = TRUE LEFT JOIN sources s ON s.id = e.source_id WHERE c.project_id = $1 AND c.is_current = TRUE" +
       (unsupportedOnly ? " AND c.support_status = 'UNSUPPORTED'" : "") +
       " GROUP BY c.id ORDER BY CASE c.importance WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END, c.created_at",
     [projectId]
@@ -213,7 +217,8 @@ export async function listLedger(
 
 export async function addFinding(
   projectId: string,
-  rawInput: unknown
+  rawInput: unknown,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
 ): Promise<Record<string, unknown>> {
   const input = findingInputSchema.parse(rawInput);
   return withTransaction(async (client) => {
@@ -247,7 +252,7 @@ export async function addFinding(
     await invalidateDownstreamReview(client, projectId, "SYNTHESIZING");
     for (const claimId of input.claimIds) {
       const linked = await client.query(
-        "INSERT INTO finding_claims (finding_id, claim_id) SELECT $1, id FROM claims WHERE id = $2 AND project_id = $3 ON CONFLICT DO NOTHING",
+        "INSERT INTO finding_claims (finding_id, claim_id) SELECT $1, id FROM claims WHERE id = $2 AND project_id = $3 AND is_current = TRUE ON CONFLICT DO NOTHING",
         [id, claimId, projectId]
       );
       if (!linked.rowCount) {
@@ -256,8 +261,7 @@ export async function addFinding(
     }
     await writeAuditEvent(client, {
       projectId,
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action: "FINDING_CREATED",
       resourceType: "finding",
       resourceId: id,

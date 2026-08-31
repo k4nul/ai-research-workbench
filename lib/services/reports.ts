@@ -4,7 +4,11 @@ import {
   deliverableUpdateSchema,
   type ReportSections
 } from "@/lib/validation";
-import { writeAuditEvent } from "@/lib/services/audit";
+import {
+  LOCAL_USER_AUDIT_ACTOR,
+  writeAuditEvent,
+  type AuditActor
+} from "@/lib/services/audit";
 import { notFound } from "@/lib/services/errors";
 import { refreshProjectProgress } from "@/lib/services/progress";
 import { invalidateDownstreamReview } from "@/lib/services/review-state";
@@ -38,7 +42,8 @@ export async function getCurrentDeliverable(
 
 export async function updateDeliverable(
   projectId: string,
-  rawInput: unknown
+  rawInput: unknown,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
 ): Promise<Record<string, unknown>> {
   const input = deliverableUpdateSchema.parse(rawInput);
   return withTransaction(async (client) => {
@@ -73,7 +78,7 @@ export async function updateDeliverable(
       [
         randomUUID(),
         current.rows[0].id,
-        input.actorType,
+        actor.actorType,
         changedSections,
         JSON.stringify(current.rows[0].sections),
         JSON.stringify(input.sections)
@@ -81,8 +86,7 @@ export async function updateDeliverable(
     );
     await writeAuditEvent(client, {
       projectId,
-      actorType: input.actorType,
-      actorLabel: input.actorType === "AI" ? "Configured provider" : "Local user",
+      ...actor,
       action: "DELIVERABLE_UPDATED",
       resourceType: "deliverable",
       resourceId: current.rows[0].id,

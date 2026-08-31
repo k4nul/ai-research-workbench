@@ -4,7 +4,12 @@ import {
   researchPlanSchema,
   researchQuestionSchema
 } from "@/lib/validation";
-import { writeAuditEvent } from "@/lib/services/audit";
+import {
+  CONFIGURED_PROVIDER_AUDIT_ACTOR,
+  LOCAL_USER_AUDIT_ACTOR,
+  writeAuditEvent,
+  type AuditActor
+} from "@/lib/services/audit";
 import { AppError, notFound } from "@/lib/services/errors";
 import { refreshProjectProgress } from "@/lib/services/progress";
 import { invalidateDownstreamReview } from "@/lib/services/review-state";
@@ -12,11 +17,15 @@ import { runPersistedAiStage } from "@/lib/services/provider-runs";
 
 export async function addResearchQuestion(
   projectId: string,
-  rawInput: unknown
+  rawInput: unknown,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
 ): Promise<Record<string, unknown>> {
   const input = researchQuestionSchema.parse(rawInput);
   return withTransaction(async (client) => {
-    const project = await client.query("SELECT id FROM research_projects WHERE id = $1", [projectId]);
+    const project = await client.query(
+      "SELECT id FROM research_projects WHERE id = $1 FOR UPDATE",
+      [projectId]
+    );
     if (!project.rowCount) {
       throw notFound("Project");
     }
@@ -50,8 +59,7 @@ export async function addResearchQuestion(
     await invalidateDownstreamReview(client, projectId, "RESEARCHING");
     await writeAuditEvent(client, {
       projectId,
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action: "RESEARCH_QUESTION_CREATED",
       resourceType: "research_question",
       resourceId: id,
@@ -69,9 +77,17 @@ export async function updateResearchQuestion(
     status?: "OPEN" | "PLANNED" | "RESEARCHING" | "COMPLETE" | "BLOCKED";
     gapStatus?: "NONE" | "OPEN" | "ACCEPTED" | "RESOLVED";
     researchGap?: string;
-  }
+  },
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
 ): Promise<Record<string, unknown>> {
   return withTransaction(async (client) => {
+    const project = await client.query(
+      "SELECT id FROM research_projects WHERE id = $1 FOR UPDATE",
+      [projectId]
+    );
+    if (!project.rowCount) {
+      throw notFound("Project");
+    }
     const before = await client.query(
       "SELECT * FROM research_questions WHERE id = $1 AND project_id = $2 FOR UPDATE",
       [questionId, projectId]
@@ -86,8 +102,7 @@ export async function updateResearchQuestion(
     await invalidateDownstreamReview(client, projectId, "RESEARCHING");
     await writeAuditEvent(client, {
       projectId,
-      actorType: "USER",
-      actorLabel: "Local user",
+      ...actor,
       action: "RESEARCH_QUESTION_UPDATED",
       resourceType: "research_question",
       resourceId: questionId,
@@ -101,10 +116,18 @@ export async function updateResearchQuestion(
 
 export async function addResearchPlan(
   projectId: string,
-  rawInput: unknown
+  rawInput: unknown,
+  actor: AuditActor = LOCAL_USER_AUDIT_ACTOR
 ): Promise<Record<string, unknown>> {
   const input = researchPlanSchema.parse(rawInput);
   return withTransaction(async (client) => {
+    const project = await client.query(
+      "SELECT id FROM research_projects WHERE id = $1 FOR UPDATE",
+      [projectId]
+    );
+    if (!project.rowCount) {
+      throw notFound("Project");
+    }
     const question = await client.query(
       "SELECT id FROM research_questions WHERE id = $1 AND project_id = $2",
       [input.questionId, projectId]
@@ -142,8 +165,7 @@ export async function addResearchPlan(
     );
     await writeAuditEvent(client, {
       projectId,
-      actorType: input.aiSuggested ? "AI" : "USER",
-      actorLabel: input.aiSuggested ? "Configured provider" : "Local user",
+      ...actor,
       action: "RESEARCH_PLAN_SAVED",
       resourceType: "research_plan",
       resourceId: result.rows[0].id,
@@ -198,7 +220,7 @@ export async function generateProviderPlan(projectId: string): Promise<Record<st
       );
     }
     for (const input of parsedQuestionInputs.data) {
-      await addResearchQuestion(projectId, input);
+      await addResearchQuestion(projectId, input, CONFIGURED_PROVIDER_AUDIT_ACTOR);
     }
     questions = await query<{ id: string; question: string }>(
       "SELECT id, question FROM research_questions WHERE project_id = $1 ORDER BY created_at",
@@ -263,7 +285,7 @@ export async function generateProviderPlan(projectId: string): Promise<Record<st
         "The AI plan referenced a question outside this project."
       );
     }
-    const plan = await addResearchPlan(projectId, input);
+    const plan = await addResearchPlan(projectId, input, CONFIGURED_PROVIDER_AUDIT_ACTOR);
     created.push({ question, plan });
   }
   return {

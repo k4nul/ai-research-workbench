@@ -1,8 +1,8 @@
-import { handleRoute } from "@/lib/http";
+import { handleAuthenticatedRoute } from "@/lib/http";
 import { getProviderStatuses } from "@/lib/services/provider-runs";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  return handleRoute(async () => getProviderStatuses());
+export async function GET(request: Request) {
+  return handleAuthenticatedRoute(request, async () => getProviderStatuses());
 }

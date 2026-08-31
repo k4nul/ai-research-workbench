@@ -1,4 +1,5 @@
-import { handleRoute } from "@/lib/http";
+import { principalAuditActor } from "@/lib/auth/audit-actor";
+import { handleAuthenticatedRoute } from "@/lib/http";
 import {
   deleteProject,
   getProjectBundle,
@@ -9,22 +10,26 @@ type Context = { params: Promise<{ projectId: string }> };
 
 export const dynamic = "force-dynamic";
 
-export async function GET(_request: Request, context: Context) {
+export async function GET(request: Request, context: Context) {
   const { projectId } = await context.params;
-  return handleRoute(() => getProjectBundle(projectId));
+  return handleAuthenticatedRoute(request, () => getProjectBundle(projectId));
 }
 
-export async function DELETE(_request: Request, context: Context) {
+export async function DELETE(request: Request, context: Context) {
   const { projectId } = await context.params;
-  return handleRoute(async () => {
-    await deleteProject(projectId);
-    return { deleted: true, projectId };
+  return handleAuthenticatedRoute(request, async (principal) => {
+    const deletion = await deleteProject(projectId, principalAuditActor(principal));
+    return { deleted: true, projectId, ...deletion };
   });
 }
 
 export async function PATCH(request: Request, context: Context) {
   const { projectId } = await context.params;
-  return handleRoute(async () =>
-    updateProjectScope(projectId, await request.json())
+  return handleAuthenticatedRoute(request, async (principal) =>
+    updateProjectScope(
+      projectId,
+      await request.json(),
+      principalAuditActor(principal)
+    )
   );
 }

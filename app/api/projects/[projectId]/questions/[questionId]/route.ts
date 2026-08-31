@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { handleRoute } from "@/lib/http";
+import { principalAuditActor } from "@/lib/auth/audit-actor";
+import { handleAuthenticatedRoute } from "@/lib/http";
 import { updateResearchQuestion } from "@/lib/services/workflow";
 
 type Context = {
@@ -14,7 +15,12 @@ const updateSchema = z.object({
 
 export async function PATCH(request: Request, context: Context) {
   const { projectId, questionId } = await context.params;
-  return handleRoute(async () =>
-    updateResearchQuestion(projectId, questionId, updateSchema.parse(await request.json()))
+  return handleAuthenticatedRoute(request, async (principal) =>
+    updateResearchQuestion(
+      projectId,
+      questionId,
+      updateSchema.parse(await request.json()),
+      principalAuditActor(principal)
+    )
   );
 }

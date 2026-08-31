@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { handleRoute } from "@/lib/http";
+import { principalAuditActor } from "@/lib/auth/audit-actor";
+import { handleAuthenticatedRoute } from "@/lib/http";
 import { resolveQaFinding } from "@/lib/services/qa";
 
 type Context = {
@@ -12,8 +13,13 @@ const schema = z.object({
 
 export async function PATCH(request: Request, context: Context) {
   const { projectId, findingId } = await context.params;
-  return handleRoute(async () => {
+  return handleAuthenticatedRoute(request, async (principal) => {
     const input = schema.parse(await request.json());
-    return resolveQaFinding(projectId, findingId, input.resolutionStatus);
+    return resolveQaFinding(
+      projectId,
+      findingId,
+      input.resolutionStatus,
+      principalAuditActor(principal)
+    );
   });
 }

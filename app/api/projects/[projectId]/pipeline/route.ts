@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { enforceRateLimit, handleRoute } from "@/lib/http";
+import { enforceRateLimit, handleAuthenticatedRoute } from "@/lib/http";
 import {
   getAiRuns,
   isAiStage,
@@ -16,14 +16,14 @@ const runSchema = z.object({
   allowedSourceIds: z.array(z.string().trim().min(1)).max(200).default([])
 });
 
-export async function GET(_request: Request, context: Context) {
+export async function GET(request: Request, context: Context) {
   const { projectId } = await context.params;
-  return handleRoute(() => getAiRuns(projectId));
+  return handleAuthenticatedRoute(request, () => getAiRuns(projectId));
 }
 
 export async function POST(request: Request, context: Context) {
   const { projectId } = await context.params;
-  return handleRoute(async () => {
+  return handleAuthenticatedRoute(request, async () => {
     enforceRateLimit(request, "ai-pipeline", 10);
     const input = runSchema.parse(await request.json());
     if (!isAiStage(input.stage)) {
