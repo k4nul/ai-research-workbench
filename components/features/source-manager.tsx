@@ -2,10 +2,11 @@
 
 import { FileUp, Globe2, Link2, LoaderCircle, Plus, Search, Share2 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 
 import { apiRequest, type MutationMessage } from "./client-api";
 import { MutationFeedback } from "./mutation-ui";
+import { uploadMutationFingerprint } from "./upload-idempotency";
 
 type AcquisitionMode = "manual" | "search" | "fetch" | "upload" | "import" | "reuse";
 
@@ -28,6 +29,7 @@ export function SourceManager({ projectId }: { projectId: string }) {
   const [mode, setMode] = useState<AcquisitionMode>("manual");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<MutationMessage | null>(null);
+  const uploadAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const root = `/api/projects/${encodeURIComponent(projectId)}/sources`;
 
   async function run(endpoint: string, init: RequestInit, success: string, form?: HTMLFormElement) {
@@ -38,8 +40,10 @@ export function SourceManager({ projectId }: { projectId: string }) {
       form?.reset();
       setMessage({ tone: "success", text: success });
       router.refresh();
+      return true;
     } catch (error) {
       setMessage({ tone: "error", text: error instanceof Error ? error.message : "Source action failed." });
+      return false;
     } finally {
       setPending(false);
     }
@@ -74,7 +78,19 @@ export function SourceManager({ projectId }: { projectId: string }) {
     const target = event.currentTarget;
     const form = new FormData(target);
     if (mode === "upload") {
-      await run(`${root}/upload`, { method: "POST", body: form }, "File uploaded and added as a source.", target);
+      const fingerprint = await uploadMutationFingerprint(projectId, form);
+      const attempt =
+        uploadAttempt.current?.fingerprint === fingerprint
+          ? uploadAttempt.current
+          : { fingerprint, key: crypto.randomUUID() };
+      uploadAttempt.current = attempt;
+      const succeeded = await run(
+        `${root}/upload`,
+        { method: "POST", headers: { "Idempotency-Key": attempt.key }, body: form },
+        "File uploaded and added as a source.",
+        target
+      );
+      if (succeeded && uploadAttempt.current === attempt) uploadAttempt.current = null;
       return;
     }
     const payload =

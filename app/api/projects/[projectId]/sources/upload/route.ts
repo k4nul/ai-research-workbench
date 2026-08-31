@@ -1,32 +1,35 @@
-import { enforceRateLimit, handleRoute } from "@/lib/http";
-import { uploadAndRegisterSource } from "@/lib/services/ingestion";
-import { AppError } from "@/lib/services/errors";
+import { enforceRateLimit, handleAuthenticatedRoute } from "@/lib/http";
+import {
+  documentProjectIdSchema,
+  parseBoundedUploadForm,
+  quarantineDocumentForm
+} from "@/lib/documents/http";
+import { query } from "@/lib/db";
+import { requestIdempotencyKey } from "@/lib/operations/request";
 
 type Context = { params: Promise<{ projectId: string }> };
 
-function text(form: FormData, name: string): string | undefined {
-  const value = form.get(name);
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
 export async function POST(request: Request, context: Context) {
-  const { projectId } = await context.params;
-  return handleRoute(async () => {
+  return handleAuthenticatedRoute(request, async (principal) => {
+    const idempotencyKey = requestIdempotencyKey(request);
     enforceRateLimit(request, "source-upload", 10);
-    const form = await request.formData();
-    const file = form.get("file");
-    if (!(file instanceof File)) {
-      throw new AppError(400, "FILE_REQUIRED", "Choose a source file to upload.");
-    }
-    return uploadAndRegisterSource(projectId, file, {
-      title: text(form, "title"),
-      publisher: text(form, "publisher"),
-      author: text(form, "author"),
-      publishedAt: text(form, "publishedAt"),
-      sourceType: text(form, "sourceType"),
-      language: text(form, "language"),
-      reliabilityGrade: text(form, "reliabilityGrade"),
-      usageRestrictions: text(form, "usageRestrictions")
+    const projectId = documentProjectIdSchema.parse((await context.params).projectId);
+    const form = await parseBoundedUploadForm(request);
+    const uploaded = await quarantineDocumentForm({
+      projectId,
+      form,
+      principal,
+      idempotencyKey
     });
-  }, { status: 201 });
+    const source = await query("SELECT * FROM sources WHERE id = $1 AND project_id = $2", [
+      uploaded.document.sourceId,
+      projectId
+    ]);
+    return {
+      ...source.rows[0],
+      document_id: uploaded.document.id,
+      document_status: uploaded.document.status,
+      scan_job: uploaded.scanJob
+    };
+  }, { status: 201, mutation: true, idempotency: "dedicated" });
 }
