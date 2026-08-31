@@ -6,11 +6,13 @@ import { ApiActionButton } from "@/components/features/mutation-ui";
 import { ProjectPageShell } from "@/components/features/page-shell";
 import { loadProject } from "@/components/features/server-data";
 import { DataTable, EmptyState, SeverityBadge, StatusBadge, type DataTableColumn } from "@/components/ui";
+import { requirePageOperator } from "@/lib/auth/dal";
 import { listQaFindings } from "@/lib/services/qa";
 
 export const dynamic = "force-dynamic";
 
 export default async function QaPage({ params }: { params: Promise<{ projectId: string }> }) {
+  await requirePageOperator();
   const { projectId } = await params;
   const [project, findingValue] = await Promise.all([loadProject(projectId), listQaFindings(projectId)]);
   const findings = asRows<QaFindingRecord>(findingValue);

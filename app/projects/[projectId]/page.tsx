@@ -5,10 +5,12 @@ import { formatDate, formatDateTime, humanize } from "@/components/features/form
 import { ProjectPageShell } from "@/components/features/page-shell";
 import { loadProjectBundle } from "@/components/features/server-data";
 import { DataTable, EmptyState, KpiCard, ProgressBar, StatusBadge, type DataTableColumn } from "@/components/ui";
+import { requirePageOperator } from "@/lib/auth/dal";
 
 export const dynamic = "force-dynamic";
 
 export default async function ProjectOverviewPage({ params }: { params: Promise<{ projectId: string }> }) {
+  await requirePageOperator();
   const { projectId } = await params;
   const bundle = await loadProjectBundle(projectId);
   const openQa = bundle.qaFindings.filter((finding) => finding.resolution_status === "OPEN");

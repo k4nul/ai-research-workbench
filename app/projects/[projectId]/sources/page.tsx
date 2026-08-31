@@ -6,10 +6,12 @@ import { ProjectPageShell } from "@/components/features/page-shell";
 import { loadProjectBundle } from "@/components/features/server-data";
 import { SourceManager } from "@/components/features/source-manager";
 import { DataTable, EmptyState, StatusBadge, type DataTableColumn } from "@/components/ui";
+import { requirePageOperator } from "@/lib/auth/dal";
 
 export const dynamic = "force-dynamic";
 
 export default async function SourcesPage({ params }: { params: Promise<{ projectId: string }> }) {
+  await requirePageOperator();
   const { projectId } = await params;
   const bundle = await loadProjectBundle(projectId);
   const evidenceCounts = new Map<string, number>();

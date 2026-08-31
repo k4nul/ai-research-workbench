@@ -1,7 +1,91 @@
+import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { ZodError } from "zod";
+import {
+  requireAuthenticatedApiRequest,
+  type RequestPrincipal
+} from "@/lib/auth/dal";
+import { structuredLog } from "@/lib/observability/log";
+import {
+  requestQueryScope,
+  requestIdempotencyKey
+} from "@/lib/operations/request";
 import { AppError } from "@/lib/services/errors";
+import { executeIdempotentMutation } from "@/lib/services/mutation-receipts";
 import { formatValidationError } from "@/lib/validation";
+
+const MAX_CENTRAL_MUTATION_BODY_BYTES = 4 * 1_024 * 1_024;
+
+function isUnsafeMethod(method: string): boolean {
+  return !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
+}
+
+function principalScope(principal: RequestPrincipal): string {
+  return principal.kind === "operator"
+    ? `operator:${principal.session.operator.id}`
+    : "demo-bypass";
+}
+
+async function boundedMutationBody(request: Request): Promise<Uint8Array> {
+  const contentType = request.headers.get("content-type")?.toLowerCase() ?? "";
+  if (contentType.startsWith("multipart/form-data")) {
+    throw new AppError(
+      500,
+      "IDEMPOTENCY_MODE_REQUIRED",
+      "Multipart mutations must use a dedicated bounded idempotency implementation."
+    );
+  }
+  const rawLength = request.headers.get("content-length");
+  if (rawLength && /^\d+$/u.test(rawLength) && Number(rawLength) > MAX_CENTRAL_MUTATION_BODY_BYTES) {
+    throw new AppError(
+      413,
+      "MUTATION_BODY_TOO_LARGE",
+      "The mutation body exceeds the idempotency receipt limit."
+    );
+  }
+  if (!request.body) return new Uint8Array();
+
+  const reader = request.clone().body!.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_CENTRAL_MUTATION_BODY_BYTES) {
+        const reason = "Mutation body exceeded its configured bound.";
+        void reader.cancel(reason).catch(() => undefined);
+        void request.body.cancel(reason).catch(() => undefined);
+        throw new AppError(
+          413,
+          "MUTATION_BODY_TOO_LARGE",
+          "The mutation body exceeds the idempotency receipt limit."
+        );
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
+async function mutationRequestHash(request: Request): Promise<string> {
+  const hash = createHash("sha256");
+  hash.update(requestQueryScope(request));
+  hash.update("\0");
+  hash.update(request.headers.get("content-type")?.toLowerCase() ?? "");
+  hash.update("\0");
+  hash.update(await boundedMutationBody(request));
+  return hash.digest("hex");
+}
 
 export async function handleRoute<T>(
   operation: () => Promise<T>,
@@ -13,6 +97,55 @@ export async function handleRoute<T>(
       { data },
       { status: options.status ?? 200, headers: noStoreJsonHeaders() }
     );
+  } catch (error) {
+    return routeErrorResponse(error);
+  }
+}
+
+export async function handleAuthenticatedRoute<T>(
+  request: Request,
+  operation: (principal: RequestPrincipal) => Promise<T>,
+  options: {
+    status?: number;
+    mutation?: boolean;
+    idempotency?: "central" | "dedicated";
+  } = {}
+): Promise<NextResponse> {
+  try {
+    const mutation = options.mutation ?? isUnsafeMethod(request.method);
+    const principal = await requireAuthenticatedApiRequest(request, {
+      mutation
+    });
+    if (!mutation || options.idempotency === "dedicated") {
+      return NextResponse.json(
+        { data: await operation(principal) },
+        { status: options.status ?? 200, headers: noStoreJsonHeaders() }
+      );
+    }
+
+    const method = request.method.toUpperCase();
+    if (!["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+      throw new AppError(
+        500,
+        "IDEMPOTENCY_METHOD_UNSUPPORTED",
+        "This mutation method does not have an idempotency receipt implementation."
+      );
+    }
+    const receipt = await executeIdempotentMutation(
+      {
+        principalScope: principalScope(principal),
+        method: method as "POST" | "PUT" | "PATCH" | "DELETE",
+        requestPath: new URL(request.url).pathname,
+        idempotencyKey: requestIdempotencyKey(request),
+        requestHash: await mutationRequestHash(request)
+      },
+      options.status ?? 200,
+      () => operation(principal)
+    );
+    return new NextResponse(receipt.responseBody, {
+      status: receipt.responseStatus,
+      headers: { ...noStoreJsonHeaders(), "Content-Type": "application/json" }
+    });
   } catch (error) {
     return routeErrorResponse(error);
   }
@@ -44,7 +177,11 @@ export function routeErrorResponse(error: unknown): NextResponse {
     );
   }
   const reference = crypto.randomUUID();
-  console.error("Unhandled request error", { reference, error });
+  structuredLog("error", "http.request_failed", {
+    service: "web",
+    requestId: reference,
+    errorCode: error instanceof Error ? error.name : "UNKNOWN"
+  });
   return NextResponse.json(
     {
       error: {

@@ -4,6 +4,7 @@ import { ProjectPageShell } from "@/components/features/page-shell";
 import { ReportEditor } from "@/components/features/report-editor";
 import { loadProject } from "@/components/features/server-data";
 import { DataTable, EmptyState, StatusBadge, type DataTableColumn } from "@/components/ui";
+import { requirePageOperator } from "@/lib/auth/dal";
 import { getCurrentDeliverable, getDeliverableHistory } from "@/lib/services/reports";
 
 export const dynamic = "force-dynamic";
@@ -16,6 +17,7 @@ interface RevisionRecord {
 }
 
 export default async function ReportPage({ params }: { params: Promise<{ projectId: string }> }) {
+  await requirePageOperator();
   const { projectId } = await params;
   const [project, deliverableValue, historyValue] = await Promise.all([loadProject(projectId), getCurrentDeliverable(projectId), getDeliverableHistory(projectId)]);
   const deliverable = deliverableValue as unknown as DeliverableRecord;

@@ -5,11 +5,13 @@ import { formatDate, formatDateTime, humanize } from "@/components/features/form
 import { asDashboard } from "@/components/features/model";
 import { PageShell } from "@/components/features/page-shell";
 import { DataTable, EmptyState, KpiCard, ProgressBar, StatusBadge, type DataTableColumn } from "@/components/ui";
+import { requirePageOperator } from "@/lib/auth/dal";
 import { getDashboard } from "@/lib/services/projects";
 
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
+  await requirePageOperator();
   const dashboard = asDashboard(await getDashboard());
   const projectColumns: DataTableColumn<(typeof dashboard.projects)[number]>[] = [
     { id: "project", header: "Project", cell: (project) => <div className="table-primary"><Link href={`/projects/${encodeURIComponent(project.id)}`}>{project.name}</Link><span>{project.core_question}</span></div> },

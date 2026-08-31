@@ -12,6 +12,18 @@ export type AuditInput = {
   afterState?: unknown;
 };
 
+export type AuditActor = Pick<AuditInput, "actorType" | "actorLabel">;
+
+export const LOCAL_USER_AUDIT_ACTOR: AuditActor = Object.freeze({
+  actorType: "USER",
+  actorLabel: "Local user"
+});
+
+export const CONFIGURED_PROVIDER_AUDIT_ACTOR: AuditActor = Object.freeze({
+  actorType: "AI",
+  actorLabel: "Configured provider"
+});
+
 export async function writeAuditEvent(
   client: PoolClient,
   input: AuditInput

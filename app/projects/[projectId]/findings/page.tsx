@@ -3,10 +3,12 @@ import { formatDateTime } from "@/components/features/format";
 import { ProjectPageShell } from "@/components/features/page-shell";
 import { loadProjectBundle } from "@/components/features/server-data";
 import { DataTable, EmptyState, StatusBadge, type DataTableColumn } from "@/components/ui";
+import { requirePageOperator } from "@/lib/auth/dal";
 
 export const dynamic = "force-dynamic";
 
 export default async function FindingsPage({ params }: { params: Promise<{ projectId: string }> }) {
+  await requirePageOperator();
   const { projectId } = await params;
   const bundle = await loadProjectBundle(projectId);
   const columns: DataTableColumn<(typeof bundle.findings)[number]>[] = [

@@ -7,11 +7,13 @@ import { asRows } from "@/components/features/model";
 import { ProjectPageShell } from "@/components/features/page-shell";
 import { loadProjectBundle } from "@/components/features/server-data";
 import { DataTable, EmptyState, StatusBadge, type DataTableColumn } from "@/components/ui";
+import { requirePageOperator } from "@/lib/auth/dal";
 import { listLedger } from "@/lib/services/ledger";
 
 export const dynamic = "force-dynamic";
 
 export default async function LedgerPage({ params, searchParams }: { params: Promise<{ projectId: string }>; searchParams: Promise<{ unsupported?: string }> }) {
+  await requirePageOperator();
   const { projectId } = await params;
   const filters = await searchParams;
   const unsupportedOnly = filters.unsupported === "true";

@@ -4,6 +4,7 @@ import { formatDate, formatDateTime } from "@/components/features/format";
 import { asProjects } from "@/components/features/model";
 import { PageShell } from "@/components/features/page-shell";
 import { DataTable, EmptyState, ProgressBar, StatusBadge, type DataTableColumn } from "@/components/ui";
+import { requirePageOperator } from "@/lib/auth/dal";
 import { listProjects } from "@/lib/services/projects";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +16,7 @@ interface ProjectsPageProps {
 const statuses = ["", "INTAKE", "SCOPING", "PLANNING", "RESEARCHING", "SYNTHESIZING", "QA", "APPROVAL_REQUIRED", "APPROVED", "DELIVERED", "ARCHIVED"];
 
 export default async function ProjectsPage({ searchParams }: ProjectsPageProps) {
+  await requirePageOperator();
   const filters = await searchParams;
   const projects = asProjects(await listProjects({ queryText: filters.q?.trim() || undefined, status: filters.status || undefined }));
   const columns: DataTableColumn<(typeof projects)[number]>[] = [

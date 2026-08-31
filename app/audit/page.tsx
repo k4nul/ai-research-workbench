@@ -5,12 +5,14 @@ import type { AuditRecord } from "@/components/features/model";
 import { asProjects, asRows } from "@/components/features/model";
 import { PageShell } from "@/components/features/page-shell";
 import { DataTable, EmptyState, StatusBadge, type DataTableColumn } from "@/components/ui";
+import { requirePageOperator } from "@/lib/auth/dal";
 import { query } from "@/lib/db";
 import { listProjects } from "@/lib/services/projects";
 
 export const dynamic = "force-dynamic";
 
 export default async function AuditPage({ searchParams }: { searchParams: Promise<{ projectId?: string }> }) {
+  await requirePageOperator();
   const { projectId } = await searchParams;
   const [eventsResult, projectValues] = await Promise.all([
     projectId ? query("SELECT a.*, p.name AS project_name FROM audit_events a LEFT JOIN research_projects p ON p.id = a.project_id WHERE a.project_id = $1 ORDER BY a.created_at DESC LIMIT 200", [projectId]) : query("SELECT a.*, p.name AS project_name FROM audit_events a LEFT JOIN research_projects p ON p.id = a.project_id ORDER BY a.created_at DESC LIMIT 200"),

@@ -6,10 +6,12 @@ import { formatDate, formatDateTime, humanize, safeExternalUrl } from "@/compone
 import { ProjectPageShell } from "@/components/features/page-shell";
 import { loadProject, loadSource } from "@/components/features/server-data";
 import { DataTable, DetailPanel, EmptyState, StatusBadge, type DataTableColumn } from "@/components/ui";
+import { requirePageOperator } from "@/lib/auth/dal";
 
 export const dynamic = "force-dynamic";
 
 export default async function SourceDetailPage({ params }: { params: Promise<{ projectId: string; sourceId: string }> }) {
+  await requirePageOperator();
   const { projectId, sourceId } = await params;
   const [project, detail] = await Promise.all([loadProject(projectId), loadSource(sourceId)]);
   if (detail.source.project_id !== projectId) notFound();
