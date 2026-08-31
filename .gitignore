@@ -11,6 +11,7 @@ test-results/
 /uploads/
 .data/
 .data-test/
+.artifacts/
 screenshots/.tmp/
 *.log
 *.tsbuildinfo
