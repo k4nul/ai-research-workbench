@@ -1,10 +1,12 @@
 import { Archive, CheckCircle2, Download, PackageCheck, Send } from "lucide-react";
 
+import { ExportLink } from "@/components/features/export-link";
 import { formatDateTime } from "@/components/features/format";
 import { ApiActionButton } from "@/components/features/mutation-ui";
 import { ProjectPageShell } from "@/components/features/page-shell";
 import { loadProjectBundle } from "@/components/features/server-data";
 import { ProgressBar, StatusBadge } from "@/components/ui";
+import { requirePageOperator } from "@/lib/auth/dal";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +24,7 @@ const requiredReportSections = [
 ] as const;
 
 export default async function ApprovalPage({ params }: { params: Promise<{ projectId: string }> }) {
+  await requirePageOperator();
   const { projectId } = await params;
   const bundle = await loadProjectBundle(projectId);
   const project = bundle.project;
@@ -63,7 +66,7 @@ export default async function ApprovalPage({ params }: { params: Promise<{ proje
 
         <section className="section-card">
           <div className="section-heading"><div><h2>Export deliverables</h2><p>Downloads are generated from the current stored report. Persist a ZIP before marking delivery.</p></div></div>
-          <div className="export-grid">{availableExportFormats.map((format) => <a className="export-link" download href={`/api/projects/${encodeURIComponent(projectId)}/exports/${format}?persist=true`} key={format}><span><Download aria-hidden="true" /><strong>{format.toLocaleUpperCase()}</strong></span><small>{format === "zip" ? "Final package required for delivery" : "Requested project format"}</small></a>)}</div>
+          <div className="export-grid">{availableExportFormats.map((format) => <ExportLink className="export-link" href={`/api/projects/${encodeURIComponent(projectId)}/exports/${format}`} key={format}><span><Download aria-hidden="true" /><strong>{format.toLocaleUpperCase()}</strong></span><small>{format === "zip" ? "Final package required for delivery" : "Requested project format"}</small></ExportLink>)}</div>
         </section>
 
         <section className="section-card">

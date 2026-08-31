@@ -865,7 +865,7 @@ a.kpi-card:hover {
   min-width: 0;
 }
 
-.filter-toolbar__filters > * {
+.filter-toolbar__filters > :not(.sr-only) {
   min-width: 140px;
   max-width: 240px;
 }
@@ -1302,7 +1302,7 @@ a.kpi-card:hover {
 
   .filter-search,
   .filter-toolbar__filters,
-  .filter-toolbar__filters > * {
+  .filter-toolbar__filters > :not(.sr-only) {
     width: 100%;
     max-width: none;
   }
@@ -2222,6 +2222,13 @@ a.kpi-card:hover {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+.export-action {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
 }
 
 .export-link {

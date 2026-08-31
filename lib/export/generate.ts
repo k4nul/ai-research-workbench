@@ -1,6 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
-import { access, mkdir, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { access } from "node:fs/promises";
 import { ZipArchive } from "archiver";
 import {
   Document,
@@ -10,11 +8,17 @@ import {
   TextRun
 } from "docx";
 import PDFDocument from "pdfkit";
+import type { PoolClient } from "pg";
 import { withTransaction } from "@/lib/db";
-import { getConfig } from "@/lib/config";
 import { conflict, notFound } from "@/lib/services/errors";
-import { writeAuditEvent } from "@/lib/services/audit";
-import { refreshProjectProgress } from "@/lib/services/progress";
+import { getDocumentRuntime } from "@/lib/documents/runtime";
+import type { ObjectStorage } from "@/lib/storage";
+import {
+  exportInputHash,
+  findReusableExport,
+  persistExportArtifact,
+  type ExportPersistenceExecution
+} from "@/lib/services/export-storage";
 import {
   renderLedgerCsv,
   renderReportHtml,
@@ -25,6 +29,10 @@ import {
   type ExportProject,
   type ExportSource
 } from "@/lib/export/render";
+import {
+  exportContentHash,
+  loadExportContent
+} from "@/lib/export/snapshot";
 
 export type ExportFormat = "MARKDOWN" | "HTML" | "PDF" | "DOCX" | "CSV" | "ZIP";
 
@@ -33,10 +41,17 @@ export type GeneratedArtifact = {
   filename: string;
   mimeType: string;
   buffer: Buffer;
+  persisted?: {
+    exportId: string;
+    inputHash: string;
+    sha256: string;
+    byteSize: number;
+  };
 };
 
 export type ExportSnapshot = {
   projectUpdatedAt: string;
+  contentHash: string;
   approvalStatus: string;
   qaPassedAt: string | null;
   approvedAt: string | null;
@@ -53,91 +68,95 @@ export type ExportData = {
   snapshot: ExportSnapshot;
 };
 
+export async function loadExportDataInTransaction(
+  client: PoolClient,
+  projectId: string,
+  requireApproval = false
+): Promise<ExportData> {
+  const lockedProject = await client.query<{
+    updated_at: string;
+    approval_status: string;
+    qa_passed_at: string | null;
+    approved_at: string | null;
+  }>(
+    "SELECT updated_at::text, approval_status, qa_passed_at::text, approved_at::text FROM research_projects WHERE id = $1 FOR UPDATE",
+    [projectId]
+  );
+  if (!lockedProject.rows[0]) {
+    throw notFound("Project");
+  }
+  const content = await loadExportContent(client, projectId);
+  const blockers = await client.query<{ count: string }>(
+    "SELECT COUNT(*)::text AS count FROM qa_findings WHERE project_id = $1 AND is_current = TRUE AND severity = 'BLOCKER' AND resolution_status <> 'RESOLVED'",
+    [projectId]
+  );
+  if (!content) {
+    throw conflict("NO_DELIVERABLE", "Create and save a report before exporting.");
+  }
+  if (requireApproval) {
+    if (lockedProject.rows[0].approval_status !== "APPROVED") {
+      throw conflict(
+        "APPROVAL_REQUIRED",
+        "Explicit human approval is required before final export."
+      );
+    }
+    if (Number(blockers.rows[0].count) > 0) {
+      throw conflict("QA_BLOCKED", "Resolve all QA blockers before final export.");
+    }
+  }
+  return {
+    ...content,
+    snapshot: {
+      projectUpdatedAt: lockedProject.rows[0].updated_at,
+      contentHash: exportContentHash(content),
+      approvalStatus: lockedProject.rows[0].approval_status,
+      qaPassedAt: lockedProject.rows[0].qa_passed_at,
+      approvedAt: lockedProject.rows[0].approved_at,
+      deliverableId: content.deliverable.id,
+      deliverableUpdatedAt: (
+        await client.query<{ updated_at: string }>(
+          "SELECT updated_at::text FROM deliverables WHERE id = $1",
+          [content.deliverable.id]
+        )
+      ).rows[0].updated_at
+    }
+  };
+}
+
 export async function loadExportData(
   projectId: string,
   requireApproval = false
 ): Promise<ExportData> {
-  return withTransaction(async (client) => {
-    const lockedProject = await client.query<{
-      updated_at: string;
-      approval_status: string;
-      qa_passed_at: string | null;
-      approved_at: string | null;
-    }>(
-      "SELECT updated_at::text, approval_status, qa_passed_at::text, approved_at::text FROM research_projects WHERE id = $1 FOR UPDATE",
-      [projectId]
-    );
-    if (!lockedProject.rows[0]) {
-      throw notFound("Project");
-    }
-    const project = await client.query<ExportProject>(
-      "SELECT * FROM research_projects WHERE id = $1",
-      [projectId]
-    );
-    const deliverable = await client.query<ExportDeliverable & { updated_at_text: string }>(
-      "SELECT d.*, d.updated_at::text AS updated_at_text FROM deliverables d WHERE d.project_id = $1 ORDER BY d.version DESC LIMIT 1",
-      [projectId]
-    );
-    const sources = await client.query<ExportSource>(
-      "SELECT * FROM sources WHERE project_id = $1 ORDER BY id",
-      [projectId]
-    );
-    const claims = await client.query<ExportClaim>(
-      "SELECT c.*, COALESCE(json_agg(json_build_object('evidenceId', e.id, 'summary', e.summary, 'quote', e.minimal_quote, 'relationship', ce.relationship, 'supportExtent', e.support_extent, 'sourceId', s.id, 'sourceTitle', s.title)) FILTER (WHERE e.id IS NOT NULL), '[]'::json) AS linked_evidence FROM claims c LEFT JOIN claim_evidence ce ON ce.claim_id = c.id LEFT JOIN evidence e ON e.id = ce.evidence_id LEFT JOIN sources s ON s.id = e.source_id WHERE c.project_id = $1 GROUP BY c.id ORDER BY c.id",
-      [projectId]
-    );
-    const qaFindings = await client.query<Record<string, unknown>>(
-      "SELECT rule_code, severity, location, problem, remediation, resolution_status, created_at, resolved_at FROM qa_findings WHERE project_id = $1 ORDER BY created_at",
-      [projectId]
-    );
-    const blockers = await client.query<{ count: string }>(
-      "SELECT COUNT(*)::text AS count FROM qa_findings WHERE project_id = $1 AND severity = 'BLOCKER' AND resolution_status <> 'RESOLVED'",
-      [projectId]
-    );
-    const deliverableRow = deliverable.rows[0];
-    if (!deliverableRow) {
-      throw conflict("NO_DELIVERABLE", "Create and save a report before exporting.");
-    }
-    if (requireApproval) {
-      if (lockedProject.rows[0].approval_status !== "APPROVED") {
-        throw conflict(
-          "APPROVAL_REQUIRED",
-          "Explicit human approval is required before final export."
-        );
-      }
-      if (Number(blockers.rows[0].count) > 0) {
-        throw conflict("QA_BLOCKED", "Resolve all QA blockers before final export.");
-      }
-    }
-    const { updated_at_text: deliverableUpdatedAt, ...exportDeliverable } = deliverableRow;
-    return {
-      project: project.rows[0],
-      deliverable: exportDeliverable,
-      sources: sources.rows,
-      claims: claims.rows,
-      qaFindings: qaFindings.rows,
-      snapshot: {
-        projectUpdatedAt: lockedProject.rows[0].updated_at,
-        approvalStatus: lockedProject.rows[0].approval_status,
-        qaPassedAt: lockedProject.rows[0].qa_passed_at,
-        approvedAt: lockedProject.rows[0].approved_at,
-        deliverableId: deliverableRow.id,
-        deliverableUpdatedAt
-      }
-    };
-  });
+  return withTransaction((client) =>
+    loadExportDataInTransaction(client, projectId, requireApproval)
+  );
 }
 
-async function locatePdfFont(): Promise<string | undefined> {
+export type PdfFontSelection = {
+  path: string;
+  postscriptName?: string;
+};
+
+export async function locatePdfFont(): Promise<PdfFontSelection | undefined> {
   const candidates = [
-    process.env.PDF_FONT_PATH,
-    "/usr/share/fonts/truetype/unifont/unifont.ttf",
-    "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-  ].filter((candidate): candidate is string => Boolean(candidate));
+    process.env.PDF_FONT_PATH
+      ? {
+          path: process.env.PDF_FONT_PATH,
+          postscriptName: process.env.PDF_FONT_NAME || undefined
+        }
+      : undefined,
+    {
+      path: "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
+      postscriptName: "NotoSansCJKkr-Regular"
+    },
+    { path: "/usr/share/fonts/noto/NotoSans-Regular.ttf" },
+    { path: "/usr/share/fonts/truetype/unifont/unifont.ttf" },
+    { path: "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf" },
+    { path: "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf" }
+  ].filter((candidate): candidate is PdfFontSelection => Boolean(candidate));
   for (const candidate of candidates) {
     try {
-      await access(candidate);
+      await access(candidate.path);
       return candidate;
     } catch {
       continue;
@@ -146,7 +165,7 @@ async function locatePdfFont(): Promise<string | undefined> {
   return undefined;
 }
 
-async function createPdf(
+export async function renderReportPdf(
   project: ExportProject,
   deliverable: ExportDeliverable
 ): Promise<Buffer> {
@@ -166,7 +185,11 @@ async function createPdf(
   });
   const font = await locatePdfFont();
   if (font) {
-    document.font(font);
+    if (font.postscriptName) {
+      document.font(font.path, font.postscriptName);
+    } else {
+      document.font(font.path);
+    }
   }
   document.fontSize(22).text(deliverable.title);
   document.moveDown(0.5);
@@ -269,11 +292,24 @@ async function archiveBuffers(
   return completed;
 }
 
-async function createDeliveryZip(data: ExportData): Promise<Buffer> {
+function throwIfExportAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new Error("Export generation was cancelled.");
+}
+
+async function createDeliveryZip(
+  data: ExportData,
+  signal?: AbortSignal
+): Promise<Buffer> {
+  throwIfExportAborted(signal);
   const markdown = renderReportMarkdown(data.project, data.deliverable);
   const html = renderReportHtml(data.project, data.deliverable);
-  const pdf = await createPdf(data.project, data.deliverable);
+  const pdf = await renderReportPdf(data.project, data.deliverable);
+  throwIfExportAborted(signal);
   const docx = await createDocx(data.project, data.deliverable);
+  throwIfExportAborted(signal);
   const metadata = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -298,7 +334,7 @@ async function createDeliveryZip(data: ExportData): Promise<Buffer> {
       ? "IMPORTANT: This package contains synthetic SAMPLE fixtures, not real-world research."
       : "Review the limitations and source-use restrictions before distribution."
   ].join("\n");
-  return archiveBuffers([
+  const archive = await archiveBuffers([
     { name: "final-report.md", data: markdown },
     { name: "final-report.html", data: html },
     { name: "final-report.pdf", data: pdf },
@@ -309,6 +345,8 @@ async function createDeliveryZip(data: ExportData): Promise<Buffer> {
     { name: "project-metadata.json", data: JSON.stringify(metadata, null, 2) },
     { name: "README.txt", data: readme }
   ]);
+  throwIfExportAborted(signal);
+  return archive;
 }
 
 function artifactName(format: ExportFormat): { filename: string; mimeType: string } {
@@ -329,11 +367,59 @@ function artifactName(format: ExportFormat): { filename: string; mimeType: strin
 export async function generateArtifact(
   projectId: string,
   format: ExportFormat,
-  options: { persist?: boolean; requireApproval?: boolean } = {}
+  options: {
+    persist?: boolean;
+    requireApproval?: boolean;
+    storage?: ObjectStorage;
+    storageBucket?: string;
+    maxObjectBytes?: number;
+    expectedSnapshot?: ExportSnapshot;
+    signal?: AbortSignal;
+    execution?: ExportPersistenceExecution;
+  } = {}
 ): Promise<GeneratedArtifact> {
+  const startedAt = Date.now();
   const requireApproval = options.requireApproval || format === "ZIP";
+  throwIfExportAborted(options.signal);
   const data = await loadExportData(projectId, requireApproval);
+  throwIfExportAborted(options.signal);
+  if (
+    options.expectedSnapshot &&
+    exportInputHash(projectId, format, options.expectedSnapshot) !==
+      exportInputHash(projectId, format, data.snapshot)
+  ) {
+    throw conflict(
+      "EXPORT_STALE",
+      "The project changed after the export job was submitted. Submit a new export job."
+    );
+  }
+  const shouldPersist = options.persist ?? format === "ZIP";
+  const configured =
+    options.storage && options.storageBucket && options.maxObjectBytes
+      ? undefined
+      : getDocumentRuntime();
+  const runtime = {
+    storage: options.storage ?? configured!.storage,
+    bucket: options.storageBucket ?? configured!.storageBucket,
+    maxObjectBytes: options.maxObjectBytes ?? configured!.maxObjectBytes
+  };
+  const descriptor = artifactName(format);
+  if (shouldPersist) {
+    const reusable = await findReusableExport({
+      projectId,
+      format,
+      snapshot: data.snapshot,
+      runtime,
+      execution: options.execution
+    });
+    if (reusable) {
+      throwIfExportAborted(options.signal);
+      const { buffer, ...persisted } = reusable;
+      return { format, ...descriptor, buffer, persisted };
+    }
+  }
 
+  throwIfExportAborted(options.signal);
   let buffer: Buffer;
   switch (format) {
     case "MARKDOWN":
@@ -343,7 +429,7 @@ export async function generateArtifact(
       buffer = Buffer.from(renderReportHtml(data.project, data.deliverable));
       break;
     case "PDF":
-      buffer = await createPdf(data.project, data.deliverable);
+      buffer = await renderReportPdf(data.project, data.deliverable);
       break;
     case "DOCX":
       buffer = await createDocx(data.project, data.deliverable);
@@ -352,13 +438,23 @@ export async function generateArtifact(
       buffer = Buffer.from(renderLedgerCsv(data.claims));
       break;
     case "ZIP":
-      buffer = await createDeliveryZip(data);
+      buffer = await createDeliveryZip(data, options.signal);
       break;
   }
-  const descriptor = artifactName(format);
+  throwIfExportAborted(options.signal);
   const artifact = { format, ...descriptor, buffer };
-  if (options.persist || format === "ZIP") {
-    await persistArtifact(projectId, data.snapshot, artifact, requireApproval);
+  if (shouldPersist) {
+    const persisted = await persistExportArtifact({
+      projectId,
+      snapshot: data.snapshot,
+      artifact,
+      requireApproval,
+      runtime,
+      durationMs: Date.now() - startedAt,
+      execution: options.execution
+    });
+    const { buffer: persistedBuffer, ...persistedReference } = persisted;
+    return { ...artifact, buffer: persistedBuffer, persisted: persistedReference };
   }
   return artifact;
 }
@@ -369,104 +465,17 @@ export async function persistArtifact(
   artifact: GeneratedArtifact,
   requireApproval = false
 ): Promise<void> {
-  const root = path.resolve(getConfig().storageDir, "exports");
-  const projectDirectory = path.resolve(root, projectId);
-  if (!projectDirectory.startsWith(root + path.sep)) {
-    throw new Error("Export path escaped the configured storage root.");
-  }
-  await mkdir(projectDirectory, { recursive: true, mode: 0o700 });
-  const versionedName =
-    new Date().toISOString().replaceAll(":", "-") +
-    "-" +
-    randomUUID() +
-    "-" +
-    artifact.filename;
-  const outputPath = path.resolve(projectDirectory, versionedName);
-  if (!outputPath.startsWith(projectDirectory + path.sep)) {
-    throw new Error("Artifact path escaped the project export directory.");
-  }
-  const sha256 = createHash("sha256").update(artifact.buffer).digest("hex");
-  let committed = false;
-  try {
-    await withTransaction(async (client) => {
-      const project = await client.query<{
-        updated_at: string;
-        approval_status: string;
-        qa_passed_at: string | null;
-        approved_at: string | null;
-      }>(
-        "SELECT updated_at::text, approval_status, qa_passed_at::text, approved_at::text FROM research_projects WHERE id = $1 FOR UPDATE",
-        [projectId]
-      );
-      if (!project.rows[0]) {
-        throw notFound("Project");
-      }
-      const deliverable = await client.query<{ id: string; updated_at: string }>(
-        "SELECT id, updated_at::text FROM deliverables WHERE project_id = $1 ORDER BY version DESC LIMIT 1",
-        [projectId]
-      );
-      const current = project.rows[0];
-      const currentDeliverable = deliverable.rows[0];
-      const changed =
-        current.updated_at !== snapshot.projectUpdatedAt ||
-        current.approval_status !== snapshot.approvalStatus ||
-        current.qa_passed_at !== snapshot.qaPassedAt ||
-        current.approved_at !== snapshot.approvedAt ||
-        currentDeliverable?.id !== snapshot.deliverableId ||
-        currentDeliverable?.updated_at !== snapshot.deliverableUpdatedAt;
-      if (changed) {
-        throw conflict(
-          "EXPORT_STALE",
-          "The project changed while the artifact was generated. Generate it again."
-        );
-      }
-      if (requireApproval) {
-        if (current.approval_status !== "APPROVED") {
-          throw conflict(
-            "APPROVAL_REQUIRED",
-            "Explicit human approval is required before final export."
-          );
-        }
-        const blockers = await client.query<{ count: string }>(
-          "SELECT COUNT(*)::text AS count FROM qa_findings WHERE project_id = $1 AND severity = 'BLOCKER' AND resolution_status <> 'RESOLVED'",
-          [projectId]
-        );
-        if (Number(blockers.rows[0].count) > 0) {
-          throw conflict("QA_BLOCKED", "Resolve all QA blockers before final export.");
-        }
-      }
-      await writeFile(outputPath, artifact.buffer, { mode: 0o600 });
-      await client.query(
-        "INSERT INTO project_exports (id, project_id, deliverable_id, format, storage_path, sha256, byte_size) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        [
-          randomUUID(),
-          projectId,
-          snapshot.deliverableId,
-          artifact.format,
-          outputPath,
-          sha256,
-          artifact.buffer.byteLength
-        ]
-      );
-      await writeAuditEvent(client, {
-        projectId,
-        actorType: "SYSTEM",
-        actorLabel: "Export service",
-        action: "EXPORT_GENERATED",
-        resourceType: "project_export",
-        afterState: {
-          format: artifact.format,
-          filename: versionedName,
-          sha256,
-          byteSize: artifact.buffer.byteLength
-        }
-      });
-      await refreshProjectProgress(client, projectId);
-    });
-    committed = true;
-  } finally {
-    if (!committed) {
-      await rm(outputPath, { force: true });
-    }
-  }
+  const configured = getDocumentRuntime();
+  await persistExportArtifact({
+    projectId,
+    snapshot,
+    artifact,
+    requireApproval,
+    runtime: {
+      storage: configured.storage,
+      bucket: configured.storageBucket,
+      maxObjectBytes: configured.maxObjectBytes
+    },
+    durationMs: 0
+  });
 }
