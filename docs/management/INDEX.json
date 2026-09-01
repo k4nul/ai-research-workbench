@@ -35,6 +35,11 @@
       "purpose": "Primary product, setup, operations, verification, and boundary overview."
     },
     {
+      "id": "index.document.readme-ko",
+      "path": "docs/ko/README.md",
+      "purpose": "Concise Korean product, setup, operations, verification, and safety overview."
+    },
+    {
       "id": "index.document.ai-pipeline",
       "path": "docs/AI_PIPELINE.md",
       "purpose": "Versioned eleven-stage authority, execution, provenance, and replay contract."
